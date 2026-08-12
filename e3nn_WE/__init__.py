@@ -1,7 +1,7 @@
 """Finite cyclic and dihedral equivariance with an e3nn-like API."""
 
 from . import embeddings, gspaces, nn
-from .clebsch_gordan import clebsch_gordan, coupling_dimension
+from .clebsch_gordan import clebsch_gordan, coupling_dimension, finite_group_couplings
 from .groups import CyclicGroup, DihedralGroup, FiniteGroup, Group, GroupElement, cyclic_group, dihedral_group
 from .harmonics import CircularHarmonics, RestrictedSphericalHarmonics, circular_harmonics, spherical_harmonics
 from .matrix_group import MatrixFiniteGroup
@@ -20,6 +20,7 @@ from .embedding import (
     RestrictedO3Representation,
     planar_o3,
     restrict_o3,
+    restrict_o3_irrep,
     restricted_o3_couplings,
 )
 from .representations import DirectSum, DirectSumRepresentation, Irrep, Irreps, RepBlock, Representation, direct_sum
@@ -47,6 +48,7 @@ __all__ = [
     "circular_harmonics",
     "clebsch_gordan",
     "coupling_dimension",
+    "finite_group_couplings",
     "dihedral_group",
     "direct_sum",
     "embeddings",
@@ -57,6 +59,7 @@ __all__ = [
     "nn",
     "planar_o3",
     "restrict_o3",
+    "restrict_o3_irrep",
     "restricted_o3_couplings",
     "subspace_diagnostics",
     "subspace_distance",

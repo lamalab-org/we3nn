@@ -56,3 +56,12 @@ def test_full_tensor_product_raw_api_and_instruction_metadata():
     instruction = product.instructions[0]
     assert instruction.connection_mode == "uvw"
     assert instruction.has_weight and instruction.coupling is None
+
+
+def test_explicit_full_finite_coupling_api():
+    from e3nn import group as finite
+
+    group = finite.CyclicGroup(5)
+    public = finite.clebsch_gordan(group.irrep(1), group.irrep(1), group.trivial_irrep)
+    full = finite.finite_group_couplings(group.irrep(1), group.irrep(1), group.trivial_irrep)
+    assert full.shape[0] >= public.shape[0]

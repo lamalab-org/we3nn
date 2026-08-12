@@ -155,3 +155,6 @@ def restricted_o3_couplings(
         return torch.empty(0, output.dim, left.dim, right.dim, dtype=torch.float64)
     # e3nn orders wigner_3j axes as (left, right, output).
     return o3.wigner_3j(left.l, right.l, output.l).permute(2, 0, 1).unsqueeze(0).to(torch.float64)
+
+
+restrict_o3_irrep = restrict_o3

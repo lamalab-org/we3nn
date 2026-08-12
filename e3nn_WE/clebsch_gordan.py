@@ -121,6 +121,22 @@ def coupling_dimension(left: Representation, right: Representation, output: Repr
     return int(clebsch_gordan(left, right, output).shape[0])
 
 
+def finite_group_couplings(
+    left: Representation,
+    right: Representation,
+    output: Representation,
+    *,
+    method: str = "auto",
+) -> torch.Tensor:
+    """Explicitly named full finite-group coupling API."""
+    if all(isinstance(rep, Irrep) for rep in (left, right, output)):
+        return full_coupling_basis(left, right, output)
+    from .intertwiner import intertwiner_basis, tensor_product_representation
+
+    basis = intertwiner_basis(tensor_product_representation(left, right), output, method=method)
+    return basis.reshape(-1, output.dim, left.dim, right.dim)
+
+
 def full_coupling_basis(left: Irrep, right: Irrep, output: Irrep) -> torch.Tensor:
     """All independent real Hom-space paths, including irrep endomorphisms."""
     return _invariant_tensor_basis(output, left, right)
