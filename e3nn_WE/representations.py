@@ -23,6 +23,11 @@ class Representation:
         *,
         supported_nonlinearities: frozenset[str] = frozenset({"norm", "gated"}),
         is_permutation: bool = False,
+        irreps: tuple[tuple[int, tuple[int, ...]], ...] | None = None,
+        change_of_basis: torch.Tensor | None = None,
+        is_irreducible: bool = False,
+        is_orthogonal: bool = True,
+        basis_kind: str | None = None,
     ):
         self.group = group
         self.name = name
@@ -30,12 +35,30 @@ class Representation:
         self._matrices = matrices
         self.supported_nonlinearities = supported_nonlinearities
         self.is_permutation = is_permutation
+        self.irreps = irreps
+        self.change_of_basis = (
+            torch.eye(self.size, dtype=torch.float64) if change_of_basis is None else change_of_basis.to(torch.float64)
+        )
+        self.change_of_basis_inv = torch.linalg.inv(self.change_of_basis)
+        self.is_irreducible = bool(is_irreducible)
+        self.is_orthogonal = bool(is_orthogonal)
+        self.basis_kind = basis_kind or ("permutation" if is_permutation else "arbitrary")
+        self.pointwise_action = "permutation" if is_permutation else None
 
-    def __call__(self, element: "GroupElement") -> torch.Tensor:
+    @property
+    def dim(self) -> int:
+        return self.size
+
+    def __call__(self, element: "GroupElement" | None = None) -> torch.Tensor | "Representation":
+        if element is None:
+            return self
         matrix = self._matrices(element)
         if matrix.shape != (self.size, self.size):
             raise RuntimeError(f"representation {self.name} produced matrix with shape {matrix.shape}")
         return matrix
+
+    def matrix(self, element: "GroupElement", *, dtype=None, device=None) -> torch.Tensor:
+        return self(element).to(dtype=dtype, device=device)
 
     def character(self, element: "GroupElement") -> float:
         return float(torch.trace(self(element)))
@@ -48,6 +71,35 @@ class Representation:
 
     def __hash__(self) -> int:
         return id(self)
+
+    def check_representation(self, exhaustive: bool = True, atol: float = 1e-10, rtol: float = 1e-10) -> bool:
+        elements = self.group.elements if exhaustive else self.group.generators
+        identity = torch.eye(self.size, dtype=torch.float64)
+        torch.testing.assert_close(self(self.group.identity), identity, atol=atol, rtol=rtol)
+        for first in elements:
+            matrix = self(first)
+            torch.testing.assert_close(self(first.inverse()) @ matrix, identity, atol=atol, rtol=rtol)
+            if self.is_orthogonal:
+                torch.testing.assert_close(matrix.T @ matrix, identity, atol=atol, rtol=rtol)
+            for second in elements:
+                torch.testing.assert_close(
+                    self(self.group.combine(first, second)), matrix @ self(second), atol=atol, rtol=rtol
+                )
+        return True
+
+    def __add__(self, other: "Representation") -> "DirectSumRepresentation":
+        return direct_sum((self, other))
+
+    def __radd__(self, other):
+        return self if other == 0 else direct_sum((other, self))
+
+    def __mul__(self, multiplicity: int) -> "DirectSumRepresentation":
+        if not isinstance(multiplicity, int) or multiplicity < 1:
+            raise ValueError("representation multiplicity must be a positive integer")
+        return direct_sum((self,) * multiplicity)
+
+    def __rmul__(self, multiplicity: int) -> "DirectSumRepresentation":
+        return self * multiplicity
 
 
 class Irrep(Representation):
@@ -62,6 +114,7 @@ class Irrep(Representation):
     ):
         self.id = tuple(irrep_id)
         self.sum_of_squares_constituents = 2 if complex_type else 1
+        self.irrep_type = "complex" if complex_type else "real"
         is_trivial = self.id == group.trivial_id
         nonlinearities = frozenset({"pointwise", "norm", "gated"}) if is_trivial else frozenset({"norm", "gated"})
         Representation.__init__(
@@ -72,6 +125,9 @@ class Irrep(Representation):
             matrices,
             supported_nonlinearities=nonlinearities,
             is_permutation=is_trivial,
+            irreps=((1, self.id),),
+            is_irreducible=True,
+            basis_kind="irrep",
         )
 
     @property
@@ -79,18 +135,69 @@ class Irrep(Representation):
         return self.id == self.group.trivial_id
 
 
-def direct_sum(representations: Sequence[Representation], name: str | None = None) -> Representation:
+@dataclass(frozen=True)
+class RepBlock:
+    multiplicity: int
+    rep: Representation
+
+
+class DirectSumRepresentation(Representation):
+    def __init__(self, representations: Sequence[Representation], name: str | None = None):
+        if not representations:
+            raise ValueError("a direct sum needs at least one representation")
+        group = representations[0].group
+        if any(rep.group is not group for rep in representations):
+            raise ValueError("all representations in a direct sum must belong to the same group")
+        self.representations = tuple(representations)
+        blocks = []
+        for rep in self.representations:
+            if blocks and blocks[-1].rep is rep:
+                blocks[-1] = RepBlock(blocks[-1].multiplicity + 1, rep)
+            else:
+                blocks.append(RepBlock(1, rep))
+        self.blocks = tuple(blocks)
+
+        def matrices(element: "GroupElement") -> torch.Tensor:
+            return torch.block_diag(*(rep(element) for rep in self.representations))
+
+        irreps = []
+        for rep in self.representations:
+            if rep.irreps is None:
+                irreps = None
+                break
+            irreps.extend(rep.irreps)
+        super().__init__(
+            group,
+            name or "+".join(rep.name for rep in self.representations),
+            sum(rep.size for rep in self.representations),
+            matrices,
+            supported_nonlinearities=frozenset.intersection(
+                *(rep.supported_nonlinearities for rep in self.representations)
+            ),
+            is_permutation=all(rep.is_permutation for rep in self.representations),
+            irreps=None if irreps is None else tuple(irreps),
+            change_of_basis=torch.block_diag(*(rep.change_of_basis for rep in self.representations)),
+            is_orthogonal=all(rep.is_orthogonal for rep in self.representations),
+            basis_kind="permutation" if all(rep.is_permutation for rep in self.representations) else "direct_sum",
+        )
+
+    def __add__(self, other: Representation) -> "DirectSumRepresentation":
+        right = other.representations if isinstance(other, DirectSumRepresentation) else (other,)
+        return DirectSumRepresentation((*self.representations, *right))
+
+    def __mul__(self, multiplicity: int) -> "DirectSumRepresentation":
+        if not isinstance(multiplicity, int) or multiplicity < 1:
+            raise ValueError("representation multiplicity must be a positive integer")
+        return DirectSumRepresentation(self.representations * multiplicity)
+
+
+def direct_sum(representations: Sequence[Representation], name: str | None = None) -> DirectSumRepresentation:
     if not representations:
         raise ValueError("a direct sum needs at least one representation")
-    group = representations[0].group
-    if any(rep.group is not group for rep in representations):
-        raise ValueError("all representations in a direct sum must belong to the same group")
-    size = sum(rep.size for rep in representations)
+    return DirectSumRepresentation(representations, name)
 
-    def matrices(element: "GroupElement") -> torch.Tensor:
-        return torch.block_diag(*(rep(element) for rep in representations))
 
-    return Representation(group, name or "+".join(rep.name for rep in representations), size, matrices)
+DirectSum = DirectSumRepresentation
 
 
 @dataclass(frozen=True)

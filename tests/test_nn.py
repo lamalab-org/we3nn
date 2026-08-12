@@ -74,14 +74,32 @@ def test_type_and_shape_errors_are_early():
         nn.Linear(input_type, regular_type)(nn.GeometricTensor(torch.randn(2, regular_type.size), regular_type))
 
 
-def test_large_group_regular_setup_does_not_build_quartic_basis():
-    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(32).fibergroup)
+def test_large_group_regular_setup_uses_quadratic_permutation_indices():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(128).fibergroup)
     type_ = nn.FieldType(space, [space.regular_repr])
     layer = nn.Linear(type_, type_)
     pair = layer._pairs[0]
-    assert pair.basis.shape == (64, 64, 64)
-    assert pair.coefficients.numel() == 64
+    assert pair.basis.numel() == 0
+    assert pair.relative.shape == (256, 256)
+    assert pair.coefficients.numel() == 256
+    assert sum(buffer.numel() * buffer.element_size() for buffer in layer.buffers()) < 600_000
     _assert_module_equivariant(layer, type_, space.fibergroup, atol=3e-5)
+
+
+def test_double_rebuilds_intertwiner_basis_at_float64_precision():
+    space = gspaces.no_base_space(gspaces.rot2dOnR2(3).fibergroup)
+    input_type = nn.FieldType(space, [space.irrep(1), space.regular_repr, space.irrep(0)])
+    output_type = nn.FieldType(space, [space.regular_repr, space.irrep(1)])
+    layer = nn.Linear(input_type, output_type).double()
+    x = nn.GeometricTensor(torch.randn(4, input_type.size, dtype=torch.float64), input_type)
+    y = layer(x)
+    for element in space.fibergroup.elements:
+        torch.testing.assert_close(
+            layer(x.transform_fibers(element)).tensor,
+            y.transform_fibers(element).tensor,
+            atol=2e-12,
+            rtol=2e-12,
+        )
 
 
 def test_valid_parameterless_zero_map_tracks_dtype_and_device():

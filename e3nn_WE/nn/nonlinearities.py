@@ -8,6 +8,8 @@ from torch.nn import functional as F
 
 from .field_type import FieldType
 from .geometric_tensor import GeometricTensor
+from ..representations import Representation
+from ..gspaces import no_base_space
 
 
 class PointwiseNonLinearity(nn.Module):
@@ -45,3 +47,25 @@ class ELU(PointwiseNonLinearity):
         self.alpha = float(alpha)
         self.inplace = inplace
         super().__init__(in_type, lambda tensor: F.elu(tensor, alpha=self.alpha, inplace=self.inplace))
+
+
+class PointwiseActivation(PointwiseNonLinearity):
+    """Generic pointwise activation accepting a Representation and raw tensors."""
+
+    def __init__(self, representation: FieldType | Representation, activation: Callable[[torch.Tensor], torch.Tensor]):
+        self._raw_tensor_api = isinstance(representation, Representation)
+        field_type = (
+            FieldType(no_base_space(representation.group), [representation])
+            if self._raw_tensor_api
+            else representation
+        )
+        super().__init__(field_type, activation)
+
+    def forward(self, input):
+        raw = isinstance(input, torch.Tensor)
+        if raw:
+            if not self._raw_tensor_api:
+                raise TypeError("raw tensors require construction from a Representation")
+            input = GeometricTensor(input, self.in_type)
+        output = super().forward(input)
+        return output.tensor if raw else output

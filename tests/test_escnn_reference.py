@@ -2,6 +2,9 @@
 
 import numpy as np
 import pytest
+import torch
+
+pytestmark = pytest.mark.escnn
 
 try:
     from escnn import gspaces as escnn_gspaces, nn as escnn_nn
@@ -9,6 +12,7 @@ except ImportError as error:
     pytest.skip(f"complete escnn reference installation unavailable: {error}", allow_module_level=True)
 
 from e3nn_WE import cyclic_group, dihedral_group, gspaces, nn
+from e3nn_WE import clebsch_gordan, subspace_diagnostics
 
 
 @pytest.mark.parametrize("n", [3, 4, 6, 9])
@@ -61,3 +65,152 @@ def test_d6_linear_has_same_number_of_trainable_degrees_of_freedom_as_escnn():
     assert sum(parameter.numel() for parameter in our_layer.parameters()) == sum(
         parameter.numel() for parameter in esc_layer.parameters()
     )
+
+
+@pytest.mark.parametrize("kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)])
+def test_all_irrep_cg_spaces_match_escnn(kind, n):
+    reference = (
+        escnn_gspaces.rot2dOnR2(N=n).fibergroup
+        if kind == "cyclic"
+        else escnn_gspaces.flipRot2dOnR2(N=n).fibergroup
+    )
+    ours = cyclic_group(n) if kind == "cyclic" else dihedral_group(n)
+    for left in ours.irreps():
+        for right in ours.irreps():
+            for output in ours.irreps():
+                ours_basis = clebsch_gordan(left, right, output)
+                reference_raw = reference._clebsh_gordan_coeff(left.id, right.id, output.id)
+                reference_basis = torch.from_numpy(reference_raw).permute(2, 3, 0, 1).to(torch.float64)
+                assert ours_basis.shape == reference_basis.shape, (
+                    kind, n, left.id, right.id, output.id, ours_basis.shape, reference_basis.shape
+                )
+                diagnostics = subspace_diagnostics(ours_basis, reference_basis)
+                assert diagnostics["projector_error"] < 2e-8, diagnostics
+
+
+def _physical_basis(layer):
+    parameters = list(layer.parameters())
+    with torch.no_grad():
+        saved = [parameter.clone() for parameter in parameters]
+        for parameter in parameters:
+            parameter.zero_()
+        columns = []
+        for parameter in parameters:
+            for flat_index in range(parameter.numel()):
+                parameter.reshape(-1)[flat_index] = 1.0
+                weight, bias = layer.expand_parameters()
+                columns.append(torch.cat((weight.flatten(), bias.flatten())))
+                parameter.reshape(-1)[flat_index] = 0.0
+        for parameter, value in zip(parameters, saved):
+            parameter.copy_(value)
+    return torch.stack(columns, dim=1)
+
+
+def test_synchronized_d6_linear_forward_matches_escnn():
+    torch.manual_seed(10)
+    esc_space = escnn_gspaces.no_base_space(escnn_gspaces.flipRot2dOnR2(N=6).fibergroup)
+    our_space = gspaces.no_base_space(gspaces.flipRot2dOnR2(N=6).fibergroup)
+    esc_in = escnn_nn.FieldType(esc_space, 3 * [esc_space.irrep(0, 0)] + 2 * [esc_space.irrep(1, 1)])
+    our_in = nn.FieldType(our_space, 3 * [our_space.irrep(0, 0)] + 2 * [our_space.irrep(1, 1)])
+    esc_out = escnn_nn.FieldType(esc_space, 2 * [esc_space.regular_repr])
+    our_out = nn.FieldType(our_space, 2 * [our_space.regular_repr])
+    esc_layer = escnn_nn.Linear(esc_in, esc_out, bias=True).double()
+    our_layer = nn.Linear(our_in, our_out, bias=True).double()
+    esc_weight, esc_bias = esc_layer.expand_parameters()
+    target = torch.cat((esc_weight.flatten(), esc_bias.flatten())).detach()
+    physical_basis = _physical_basis(our_layer)
+    coefficients = torch.linalg.lstsq(physical_basis, target).solution
+    residual = torch.linalg.vector_norm(physical_basis @ coefficients - target)
+    assert float(residual) < 6e-8
+    with torch.no_grad():
+        offset = 0
+        for parameter in our_layer.parameters():
+            parameter.copy_(coefficients[offset:offset + parameter.numel()].reshape_as(parameter))
+            offset += parameter.numel()
+    x = torch.randn(37, our_in.size, dtype=torch.float64)
+    ours_output = our_layer(nn.GeometricTensor(x, our_in)).tensor
+    reference_output = esc_layer(escnn_nn.GeometricTensor(x, esc_in)).tensor
+    # escnn constructs this basis in float32 before module.double(), so the
+    # synchronized physical operator retains a few e-8 of source rounding.
+    torch.testing.assert_close(ours_output, reference_output, atol=5e-8, rtol=5e-8)
+
+
+def _synchronize_linear(our_layer, esc_layer):
+    esc_weight, esc_bias = esc_layer.expand_parameters()
+    if esc_bias is None:
+        esc_bias = esc_weight.new_zeros(our_layer.out_type.size)
+    target = torch.cat((esc_weight.flatten(), esc_bias.flatten())).detach()
+    physical_basis = _physical_basis(our_layer)
+    coefficients = torch.linalg.lstsq(physical_basis, target).solution
+    residual = torch.linalg.vector_norm(physical_basis @ coefficients - target)
+    assert float(residual) < 2e-6
+    with torch.no_grad():
+        offset = 0
+        for parameter in our_layer.parameters():
+            parameter.copy_(coefficients[offset:offset + parameter.numel()].reshape_as(parameter))
+            offset += parameter.numel()
+
+
+def test_synchronized_d6_message_trunk_and_heads_match_escnn_at_every_stage():
+    torch.manual_seed(21)
+    hidden, scalar_inputs = 8, 14
+    esc_space = escnn_gspaces.no_base_space(escnn_gspaces.flipRot2dOnR2(N=6).fibergroup)
+    our_space = gspaces.no_base_space(gspaces.flipRot2dOnR2(N=6).fibergroup)
+    esc_in = escnn_nn.FieldType(esc_space, scalar_inputs * [esc_space.irrep(0, 0)] + 2 * [esc_space.irrep(1, 1)])
+    our_in = nn.FieldType(our_space, scalar_inputs * [our_space.irrep(0, 0)] + 2 * [our_space.irrep(1, 1)])
+    esc_hidden = escnn_nn.FieldType(esc_space, (hidden // 2) * [esc_space.regular_repr])
+    our_hidden = nn.FieldType(our_space, (hidden // 2) * [our_space.regular_repr])
+    esc_scalar = escnn_nn.FieldType(esc_space, hidden * [esc_space.irrep(0, 0)])
+    our_scalar = nn.FieldType(our_space, hidden * [our_space.irrep(0, 0)])
+    esc_vector = escnn_nn.FieldType(esc_space, [esc_space.irrep(1, 1)])
+    our_vector = nn.FieldType(our_space, [our_space.irrep(1, 1)])
+    esc_z = escnn_nn.FieldType(esc_space, [esc_space.irrep(0, 0)])
+    our_z = nn.FieldType(our_space, [our_space.irrep(0, 0)])
+
+    esc_trunk_linears = [escnn_nn.Linear(esc_in, esc_hidden)] + [escnn_nn.Linear(esc_hidden, esc_hidden) for _ in range(3)]
+    our_trunk_linears = [nn.Linear(our_in, our_hidden)] + [nn.Linear(our_hidden, our_hidden) for _ in range(3)]
+    esc_scalar_head, our_scalar_head = escnn_nn.Linear(esc_hidden, esc_scalar), nn.Linear(our_hidden, our_scalar)
+    esc_vector_linears = [escnn_nn.Linear(esc_hidden, esc_hidden), escnn_nn.Linear(esc_hidden, esc_vector)]
+    our_vector_linears = [nn.Linear(our_hidden, our_hidden), nn.Linear(our_hidden, our_vector)]
+    esc_z_linears = [escnn_nn.Linear(esc_hidden, esc_hidden), escnn_nn.Linear(esc_hidden, esc_z)]
+    our_z_linears = [nn.Linear(our_hidden, our_hidden), nn.Linear(our_hidden, our_z)]
+    all_pairs = list(zip(our_trunk_linears, esc_trunk_linears)) + [
+        (our_scalar_head, esc_scalar_head),
+        *zip(our_vector_linears, esc_vector_linears),
+        *zip(our_z_linears, esc_z_linears),
+    ]
+    for ours_layer, esc_layer in all_pairs:
+        ours_layer.double()
+        esc_layer.double()
+        _synchronize_linear(ours_layer, esc_layer)
+
+    tensor = torch.randn(31, our_in.size, dtype=torch.float64)
+    ours_value = nn.GeometricTensor(tensor, our_in)
+    esc_value = escnn_nn.GeometricTensor(tensor, esc_in)
+    for index, (ours_layer, esc_layer) in enumerate(zip(our_trunk_linears, esc_trunk_linears)):
+        ours_value, esc_value = ours_layer(ours_value), esc_layer(esc_value)
+        torch.testing.assert_close(ours_value.tensor, esc_value.tensor, atol=2e-6, rtol=2e-6)
+        if index < 3:
+            ours_value = nn.ReLU(our_hidden)(ours_value)
+            esc_value = escnn_nn.ReLU(esc_hidden)(esc_value)
+            torch.testing.assert_close(ours_value.tensor, esc_value.tensor, atol=2e-6, rtol=2e-6)
+
+    torch.testing.assert_close(
+        our_scalar_head(ours_value).tensor,
+        esc_scalar_head(esc_value).tensor,
+        atol=2e-6,
+        rtol=2e-6,
+    )
+    for ours_lines, esc_lines, ours_type, esc_type in (
+        (our_vector_linears, esc_vector_linears, our_hidden, esc_hidden),
+        (our_z_linears, esc_z_linears, our_hidden, esc_hidden),
+    ):
+        ours_head = nn.ELU(ours_type)(ours_lines[0](ours_value))
+        esc_head = escnn_nn.ELU(esc_type)(esc_lines[0](esc_value))
+        torch.testing.assert_close(ours_head.tensor, esc_head.tensor, atol=2e-6, rtol=2e-6)
+        torch.testing.assert_close(
+            ours_lines[1](ours_head).tensor,
+            esc_lines[1](esc_head).tensor,
+            atol=2e-6,
+            rtol=2e-6,
+        )

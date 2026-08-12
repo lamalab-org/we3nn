@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import cached_property, lru_cache
 import math
 from typing import Iterable, Iterator, Sequence
+from abc import ABC, abstractmethod
 
 import torch
 
@@ -27,7 +28,27 @@ class GroupElement:
         return self.group.inverse(self)
 
 
-class FiniteGroup:
+class _CallableInt(int):
+    def __call__(self) -> int:
+        return int(self)
+
+
+class Group(ABC):
+    """Abstract group independent of any spatial action."""
+
+    @abstractmethod
+    def combine(self, left: GroupElement, right: GroupElement) -> GroupElement:
+        raise NotImplementedError
+
+    @abstractmethod
+    def inverse(self, element: GroupElement) -> GroupElement:
+        raise NotImplementedError
+
+    def compose(self, left: GroupElement, right: GroupElement) -> GroupElement:
+        return self.combine(left, right)
+
+
+class FiniteGroup(Group):
     """Common API for finite groups, close to escnn's fiber-group API."""
 
     name: str
@@ -41,8 +62,13 @@ class FiniteGroup:
     def testing_elements(self) -> tuple[GroupElement, ...]:
         return self._elements
 
-    def order(self) -> int:
-        return len(self._elements)
+    @property
+    def order(self) -> _CallableInt:
+        return _CallableInt(len(self._elements))
+
+    @property
+    def generators(self) -> tuple[GroupElement, ...]:
+        return self._elements
 
     def __iter__(self) -> Iterator[GroupElement]:
         return iter(self._elements)
@@ -81,12 +107,40 @@ class FiniteGroup:
     def regular_representation(self):
         return self.regular_repr
 
+    def representation(
+        self,
+        matrices,
+        *,
+        name: str = "representation",
+        is_orthogonal: bool = True,
+        supported_nonlinearities=frozenset({"norm", "gated"}),
+    ):
+        from .representations import Representation
+
+        canonical = {
+            (element.value if isinstance(element, GroupElement) else element): torch.as_tensor(matrix, dtype=torch.float64)
+            for element, matrix in matrices.items()
+        }
+        size = next(iter(canonical.values())).shape[0]
+        return Representation(
+            self,
+            name,
+            size,
+            lambda element: canonical[element.value],
+            is_orthogonal=is_orthogonal,
+            supported_nonlinearities=frozenset(supported_nonlinearities),
+        )
+
     @cached_property
     def trivial_representation(self):
         return self.irrep(*self.trivial_id)
 
     @property
     def trivial_repr(self):
+        return self.trivial_representation
+
+    @property
+    def trivial_irrep(self):
         return self.trivial_representation
 
     def tensor_product(self, left, right) -> list[tuple[int, tuple[int, ...]]]:
@@ -105,6 +159,17 @@ class FiniteGroup:
                 products.append((multiplicity, irrep_id))
         return products
 
+    def clebsch_gordan(self, left, right, output) -> torch.Tensor:
+        """Normalized real Clebsch--Gordan/intertwiner coefficients."""
+        from .clebsch_gordan import clebsch_gordan
+
+        return clebsch_gordan(left, right, output)
+
+    def restrict_o3(self, o3_irrep, *, embedding=None):
+        from .embedding import planar_o3, restrict_o3
+
+        return restrict_o3(o3_irrep, embedding or planar_o3(self))
+
 
 class CyclicGroup(FiniteGroup):
     """The rotation group C_n with real irreducible representations."""
@@ -120,6 +185,10 @@ class CyclicGroup(FiniteGroup):
 
     def __repr__(self) -> str:
         return f"CyclicGroup({self.n})"
+
+    @property
+    def generators(self):
+        return (self.element(1),)
 
     def element(self, value: int | GroupElement) -> GroupElement:
         if isinstance(value, GroupElement):
@@ -195,7 +264,19 @@ class DihedralGroup(FiniteGroup):
     def __repr__(self) -> str:
         return f"DihedralGroup({self.n})"
 
-    def element(self, value: Sequence[int] | GroupElement) -> GroupElement:
+    @property
+    def generators(self):
+        return (self.element((0, 1)), self.element((1, 0)))
+
+    def rotation(self, k: int) -> GroupElement:
+        return self.element((0, k))
+
+    def reflection(self, k: int = 0) -> GroupElement:
+        return self.element((1, k))
+
+    def element(self, value: Sequence[int] | GroupElement | int, rotation: int | None = None) -> GroupElement:
+        if rotation is not None:
+            value = (int(value), rotation)
         if isinstance(value, GroupElement):
             self._check(value)
             return value
@@ -227,9 +308,13 @@ class DihedralGroup(FiniteGroup):
         return tuple(self.irrep(*irrep_id) for irrep_id in self.irrep_ids())
 
     @lru_cache(maxsize=None)
-    def irrep(self, flip_frequency: int, frequency: int):
+    def irrep(self, flip_frequency: int | tuple[int, int], frequency: int | None = None):
         from .representations import Irrep
 
+        if frequency is None:
+            if not isinstance(flip_frequency, tuple) or len(flip_frequency) != 2:
+                raise TypeError("D_n irrep expects (flip_frequency, frequency)")
+            flip_frequency, frequency = flip_frequency
         flip_frequency, frequency = int(flip_frequency), int(frequency)
         irrep_id = (flip_frequency, frequency)
         if irrep_id not in self.irrep_ids():

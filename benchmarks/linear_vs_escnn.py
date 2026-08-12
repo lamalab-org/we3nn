@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import statistics
 import time
+import tracemalloc
 
 import torch
 
@@ -29,6 +30,15 @@ def median_forward_ms(callable_, warmup: int = 20, repeats: int = 100) -> float:
             callable_()
             samples.append((time.perf_counter_ns() - start) / 1e6)
     return statistics.median(samples)
+
+
+def peak_python_bytes(callable_) -> int:
+    """Peak Python allocation; tensor storage is reported separately."""
+    tracemalloc.start()
+    callable_()
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return peak
 
 
 def main() -> None:
@@ -53,7 +63,11 @@ def main() -> None:
     our_input = nn.GeometricTensor(tensor, our_in)
     our_ms = median_forward_ms(lambda: our_layer(our_input))
     our_storage = storage_bytes(our_layer)
-    print(f"e3nn_WE: {our_ms:.3f} ms, {our_storage / 1024:.1f} KiB persistent storage")
+    our_python_peak = peak_python_bytes(lambda: our_layer(our_input))
+    print(
+        f"e3nn_WE: {our_ms:.3f} ms, {our_storage / 1024:.1f} KiB persistent storage, "
+        f"{our_python_peak / 1024:.1f} KiB peak Python allocation"
+    )
 
     try:
         from escnn import gspaces as esc_gspaces, nn as esc_nn
@@ -76,7 +90,11 @@ def main() -> None:
     esc_input = esc_nn.GeometricTensor(tensor, esc_in)
     esc_ms = median_forward_ms(lambda: esc_layer(esc_input))
     esc_storage = storage_bytes(esc_layer)
-    print(f"escnn:  {esc_ms:.3f} ms, {esc_storage / 1024:.1f} KiB persistent storage")
+    esc_python_peak = peak_python_bytes(lambda: esc_layer(esc_input))
+    print(
+        f"escnn:  {esc_ms:.3f} ms, {esc_storage / 1024:.1f} KiB persistent storage, "
+        f"{esc_python_peak / 1024:.1f} KiB peak Python allocation"
+    )
     print(f"ratios: {our_ms / esc_ms:.3f}x time, {our_storage / esc_storage:.3f}x storage")
 
     if our_ms > esc_ms * 1.05:
