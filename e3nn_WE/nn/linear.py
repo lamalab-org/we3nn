@@ -11,6 +11,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from ..representations import Representation
+from ..intertwiner import intertwiner_basis as generic_intertwiner_basis
 from ..gspaces import no_base_space
 from .field_type import FieldType
 from .geometric_tensor import GeometricTensor
@@ -73,9 +74,15 @@ class _PairExpansion(nn.Module):
         in_rep: Representation,
         row_starts: list[int],
         column_starts: list[int],
+        backend: str = "auto",
     ):
         super().__init__()
-        dimension = _intertwiner_dimension(out_rep, in_rep)
+        if backend == "generic":
+            generic_basis = generic_intertwiner_basis(in_rep, out_rep)
+            dimension = generic_basis.shape[0]
+        else:
+            generic_basis = None
+            dimension = _intertwiner_dimension(out_rep, in_rep)
         if dimension == 0:
             raise RuntimeError("attempted to construct an empty intertwiner block")
         # Occurrences are a Cartesian product of all fields with this pair of
@@ -87,7 +94,12 @@ class _PairExpansion(nn.Module):
             raise RuntimeError("internal field-pair grouping is not Cartesian")
         self.out_rep = out_rep
         self.in_rep = in_rep
-        self._regular_to_regular = out_rep is out_rep.group.regular_repr and in_rep is out_rep.group.regular_repr
+        self.backend = backend
+        self._regular_to_regular = (
+            backend != "generic"
+            and out_rep is out_rep.group.regular_repr
+            and in_rep is out_rep.group.regular_repr
+        )
         self.coefficients = nn.Parameter(torch.empty(len(unique_rows), len(unique_columns), dimension))
         if self._regular_to_regular:
             index = {element.value: i for i, element in enumerate(out_rep.group.elements)}
@@ -103,7 +115,7 @@ class _PairExpansion(nn.Module):
         else:
             self.register_buffer(
                 "basis",
-                _intertwiner_basis(out_rep, in_rep).to(torch.get_default_dtype()),
+                (generic_basis if generic_basis is not None else _intertwiner_basis(out_rep, in_rep)).to(torch.get_default_dtype()),
                 persistent=False,
             )
             self.register_buffer("relative", torch.empty(0, dtype=torch.long), persistent=False)
@@ -149,7 +161,11 @@ class _PairExpansion(nn.Module):
             # Rebuild from the cached float64 mathematical source. In
             # particular, ``module.double()`` must not merely widen a basis
             # which was rounded to float32 during construction.
-            self.basis = _intertwiner_basis(self.out_rep, self.in_rep).to(
+            if self.backend == "generic":
+                source = generic_intertwiner_basis(self.in_rep, self.out_rep)
+            else:
+                source = _intertwiner_basis(self.out_rep, self.in_rep)
+            self.basis = source.to(
                 device=self.coefficients.device, dtype=self.coefficients.dtype
             )
         return self
@@ -200,8 +216,19 @@ class Linear(nn.Module):
     larger than a conventional dense layer.
     """
 
-    def __init__(self, in_type: FieldType | Representation, out_type: FieldType | Representation, bias: bool = True, initialize: bool = True):
+    def __init__(
+        self,
+        in_type: FieldType | Representation,
+        out_type: FieldType | Representation,
+        bias: bool = True,
+        initialize: bool = True,
+        *,
+        backend: str = "auto",
+    ):
         super().__init__()
+        if backend not in {"auto", "structured", "generic"}:
+            raise ValueError("backend must be 'auto', 'structured', or 'generic'")
+        self.backend = "structured" if backend == "auto" else backend
         self._raw_tensor_api = isinstance(in_type, Representation) and isinstance(out_type, Representation)
         if isinstance(in_type, Representation):
             in_type = FieldType(no_base_space(in_type.group), [in_type])
@@ -218,13 +245,18 @@ class Linear(nn.Module):
         for out_rep, row in zip(out_type, out_type.fields_start):
             for in_rep, column in zip(in_type, in_type.fields_start):
                 key = (out_rep, in_rep)
-                if _intertwiner_dimension(*key):
+                dimension = (
+                    generic_intertwiner_basis(in_rep, out_rep).shape[0]
+                    if self.backend == "generic"
+                    else _intertwiner_dimension(*key)
+                )
+                if dimension:
                     if key not in pair_occurrences:
                         pair_occurrences[key] = ([], [])
                     pair_occurrences[key][0].append(row)
                     pair_occurrences[key][1].append(column)
         self._pairs = nn.ModuleList(
-            _PairExpansion(out_rep, in_rep, rows, columns)
+            _PairExpansion(out_rep, in_rep, rows, columns, self.backend)
             for (out_rep, in_rep), (rows, columns) in pair_occurrences.items()
         )
 

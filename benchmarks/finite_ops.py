@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import statistics
 import time
+import sys
+from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from e3nn_WE import gspaces, nn
 
@@ -66,8 +70,36 @@ def benchmark_tensor_product():
         )
 
 
+def benchmark_message_layer():
+    from mp_example import EquivariantMPLayer
+
+    nodes, edges = 256, 1024
+    start = time.perf_counter_ns()
+    module = EquivariantMPLayer(16, 32, torch.nn.ReLU())
+    construction = (time.perf_counter_ns() - start) / 1e6
+    h = torch.randn(nodes, 16, requires_grad=True)
+    pos = torch.randn(nodes, 3, requires_grad=True)
+    anchor = torch.randn(nodes, 2, requires_grad=True)
+    edge_index = torch.randint(nodes, (2, edges))
+    forward = timed(lambda: module(h, pos, anchor, edge_index), repeats=10)
+
+    def backward():
+        module.zero_grad(set_to_none=True)
+        h.grad = pos.grad = anchor.grad = None
+        scalar, force = module(h, pos, anchor, edge_index)
+        (scalar.square().mean() + force.square().mean()).backward()
+
+    backward_ms = timed(backward, repeats=5)
+    print(
+        f"D6 message layer: construct={construction:.3f} ms, forward={forward:.3f} ms, "
+        f"backward={backward_ms:.3f} ms, parameters={sum(p.numel() for p in module.parameters())}, "
+        f"storage={storage(module)/1024:.1f} KiB"
+    )
+
+
 if __name__ == "__main__":
     torch.set_num_threads(1)
     for count in (1, 4, 16):
         benchmark_linear(count)
     benchmark_tensor_product()
+    benchmark_message_layer()

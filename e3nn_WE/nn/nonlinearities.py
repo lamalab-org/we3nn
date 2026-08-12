@@ -20,8 +20,9 @@ class PointwiseNonLinearity(nn.Module):
         unsupported = [rep.name for rep in in_type if not rep.is_permutation]
         if unsupported:
             raise ValueError(
-                "pointwise nonlinearities require permutation or one-dimensional representations; "
-                f"unsupported: {unsupported}"
+                "Pointwise activation is not equivariant in the current basis of "
+                f"representations {unsupported}. Use a permutation representation, "
+                "norm activation, gated activation, or change to a supported basis."
             )
         self.in_type = in_type
         self.out_type = in_type

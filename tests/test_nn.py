@@ -111,3 +111,26 @@ def test_valid_parameterless_zero_map_tracks_dtype_and_device():
     x = nn.GeometricTensor(torch.randn(3, input_type.size, dtype=torch.float64), input_type)
     assert torch.equal(layer(x).tensor, torch.zeros(3, output_type.size, dtype=torch.float64))
     _assert_module_equivariant(layer, input_type, space.fibergroup, atol=1e-12)
+
+
+def test_generic_and_structured_linear_backends_span_same_maps():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(4).fibergroup)
+    in_type = nn.FieldType(space, [space.irrep(0, 0), space.irrep(1, 1)])
+    out_type = nn.FieldType(space, [space.irrep(1, 1), space.irrep(0, 0)])
+    modules = [
+        nn.Linear(in_type, out_type, bias=False, backend="structured").double(),
+        nn.Linear(in_type, out_type, bias=False, backend="generic").double(),
+    ]
+    bases = []
+    for module in modules:
+        columns = []
+        with torch.no_grad():
+            for parameter in module.parameters():
+                parameter.zero_()
+            for parameter in module.parameters():
+                for index in range(parameter.numel()):
+                    parameter.reshape(-1)[index] = 1
+                    columns.append(module.expand_parameters()[0].flatten().clone())
+                    parameter.reshape(-1)[index] = 0
+        bases.append(torch.linalg.qr(torch.stack(columns, dim=1), mode="reduced").Q)
+    torch.testing.assert_close(bases[0] @ bases[0].T, bases[1] @ bases[1].T, atol=1e-10, rtol=1e-10)

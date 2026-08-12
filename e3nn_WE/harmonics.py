@@ -140,6 +140,7 @@ class RestrictedSphericalHarmonics(nn.Module):
         normalize: bool = True,
         normalization: str = "component",
         embedding: O3Embedding | None = None,
+        basis: str = "o3",
     ):
         super().__init__()
         if space_or_group is None:
@@ -161,7 +162,20 @@ class RestrictedSphericalHarmonics(nn.Module):
         self.normalization = normalization
         self.embedding = embedding or planar_o3(self.group)
         representations = [restrict_o3(o3.Irrep(degree, (-1) ** degree), self.embedding) for degree in self.degrees]
-        self.out_type = FieldType(self.space, representations)
+        if basis not in {"o3", "finite_irreps"}:
+            raise ValueError("basis must be 'o3' or 'finite_irreps'")
+        self.basis = basis
+        if basis == "finite_irreps":
+            decompositions = [rep.decompose() for rep in representations]
+            finite_reps = [irrep for decomposition in decompositions for irrep in decomposition.irreps]
+            change_inv = torch.block_diag(
+                *(torch.linalg.inv(decomposition.change_of_basis) for decomposition in decompositions)
+            )
+            self.out_type = FieldType(self.space, finite_reps)
+        else:
+            change_inv = torch.eye(sum(rep.dim for rep in representations), dtype=torch.float64)
+            self.out_type = FieldType(self.space, representations)
+        self.register_buffer("change_to_output_basis", change_inv, persistent=True)
         self.rep_out = self.out_type.representation
 
     def forward(self, vectors: torch.Tensor) -> GeometricTensor:
@@ -176,7 +190,9 @@ class RestrictedSphericalHarmonics(nn.Module):
             )
             for degree in self.degrees
         ]
-        return GeometricTensor(torch.cat(values, dim=-1), self.out_type)
+        values = torch.cat(values, dim=-1)
+        change = self.change_to_output_basis.to(device=values.device, dtype=values.dtype)
+        return GeometricTensor(values @ change.T, self.out_type)
 
 
 def spherical_harmonics(

@@ -44,6 +44,7 @@ class Representation:
         self.is_orthogonal = bool(is_orthogonal)
         self.basis_kind = basis_kind or ("permutation" if is_permutation else "arbitrary")
         self.pointwise_action = "permutation" if is_permutation else None
+        self._matrix_cache: dict[object, torch.Tensor] = {}
 
     @property
     def dim(self) -> int:
@@ -52,7 +53,12 @@ class Representation:
     def __call__(self, element: "GroupElement" | None = None) -> torch.Tensor | "Representation":
         if element is None:
             return self
-        matrix = self._matrices(element)
+        self.group._check(element)
+        key = element.value
+        matrix = self._matrix_cache.get(key)
+        if matrix is None:
+            matrix = torch.as_tensor(self._matrices(element), dtype=torch.float64).detach().cpu().contiguous()
+            self._matrix_cache[key] = matrix
         if matrix.shape != (self.size, self.size):
             raise RuntimeError(f"representation {self.name} produced matrix with shape {matrix.shape}")
         return matrix
@@ -62,6 +68,12 @@ class Representation:
 
     def character(self, element: "GroupElement") -> float:
         return float(torch.trace(self(element)))
+
+    @cached_property
+    def structural_key(self) -> tuple:
+        """Basis-sensitive deterministic key suitable for mathematical caches."""
+        matrices = tuple(self(g).numpy().tobytes() for g in self.group.elements)
+        return (self.group.structural_key, self.name, self.size, matrices)
 
     def __repr__(self) -> str:
         return f"{self.group.name}:{self.name}"

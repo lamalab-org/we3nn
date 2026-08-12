@@ -1,11 +1,13 @@
 import pytest
 import torch
+import math
 
 from e3nn_WE import (
     cyclic_group,
     dihedral_group,
     invariant_basis,
     intertwiner_basis,
+    find_representation_intertwiner,
     subspace_distance,
 )
 
@@ -48,3 +50,20 @@ def test_cg_nullspace_and_reynolds_projectors_agree():
                 nullspace = clebsch_gordan(left, right, output, method="nullspace")
                 reynolds = clebsch_gordan(left, right, output, method="reynolds")
                 assert subspace_distance(nullspace, reynolds) < 2e-10
+
+
+def test_find_global_orthogonal_representation_intertwiner():
+    group = dihedral_group(6)
+    source = group.standard_representation()
+    angle = 0.37
+    q = torch.tensor(
+        [[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]],
+        dtype=torch.float64,
+    )
+    target = group.representation(
+        {element: q @ source(element) @ q.T for element in group.elements},
+        name="rotated-standard",
+    )
+    transform = find_representation_intertwiner(source, target)
+    for element in group.elements:
+        torch.testing.assert_close(target(element) @ transform, transform @ source(element))

@@ -110,3 +110,21 @@ def test_tensor_product_gradcheck_inputs_and_external_weights():
         ).tensor
 
     assert torch.autograd.gradcheck(function, (left, right, weights), atol=1e-6, rtol=1e-5)
+
+
+def test_explicit_coupling_instruction_and_unweighted_path():
+    from e3nn_WE.nn import TensorProductInstruction
+
+    group = gspaces.rot2dOnR2(5).fibergroup
+    vector = group.irrep(1)
+    instruction = TensorProductInstruction(0, 0, 0, coupling=0, has_weight=False)
+    product = nn.TensorProduct(
+        vector,
+        vector,
+        group.trivial_irrep,
+        instructions=[instruction],
+    )
+    left, right = torch.randn(6, 2), torch.randn(6, 2)
+    assert product(left, right).shape == (6, 1)
+    assert product.weight_numel == 0
+    product.check_equivariance()

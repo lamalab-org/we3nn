@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-import math
 
 import torch
 from e3nn import o3
@@ -19,10 +18,14 @@ class O3Embedding:
         self.group = group
         self._matrix_fn = matrix_fn
         self.name = name
+        self._matrix_cache = {}
 
     def matrix(self, element: GroupElement, *, dtype=None, device=None) -> torch.Tensor:
         self.group._check(element)
-        matrix = torch.as_tensor(self._matrix_fn(element), dtype=torch.float64)
+        matrix = self._matrix_cache.get(element.value)
+        if matrix is None:
+            matrix = torch.as_tensor(self._matrix_fn(element), dtype=torch.float64).detach().cpu().contiguous()
+            self._matrix_cache[element.value] = matrix
         if matrix.shape != (3, 3):
             raise ValueError("an O3 embedding must return 3x3 matrices")
         return matrix.to(dtype=dtype, device=device)
@@ -77,8 +80,27 @@ class RestrictedO3Representation(Representation):
             is_orthogonal=True,
             basis_kind="restricted_o3",
         )
+        self._exact_decomposition = None
+        # e3nn 0.6's matrix-to-angle path leaves a few 1e-6 of group-law
+        # residual for reflections. C_n/D_n have complete real irrep catalogs, so
+        # snap the numerical restriction to the equivalent exact finite-group
+        # representation once, at construction time.
+        if isinstance(embedding.group, (CyclicGroup, DihedralGroup)):
+            decomposition = self._compute_decomposition()
+            change = decomposition.change_of_basis
+            change_inv = torch.linalg.inv(change)
+            block_rep = decomposition.representation
+            self._matrices = lambda element: change @ block_rep(element) @ change_inv
+            self._matrix_cache.clear()
+            self._exact_decomposition = decomposition
 
+    @lru_cache(maxsize=None)
     def decompose(self) -> IrrepDecomposition:
+        if self._exact_decomposition is not None:
+            return self._exact_decomposition
+        return self._compute_decomposition()
+
+    def _compute_decomposition(self) -> IrrepDecomposition:
         if not hasattr(self.group, "irreps"):
             raise NotImplementedError("decomposition requires a supplied irrep catalog")
         copies = []
@@ -90,14 +112,22 @@ class RestrictedO3Representation(Representation):
             multiplicity = int(round(character_inner / irrep.sum_of_squares_constituents))
             if not multiplicity:
                 continue
-            if irrep.sum_of_squares_constituents != 1:
-                raise NotImplementedError("automatic decomposition of complex-type real irreps is not yet canonical")
             maps = intertwiner_basis(irrep, self, method="nullspace")
-            if maps.shape[0] != multiplicity:
+            expected_maps = multiplicity * irrep.sum_of_squares_constituents
+            if maps.shape[0] != expected_maps:
                 raise RuntimeError("intertwiner dimension disagrees with character multiplicity")
             for mapping in maps:
-                columns.append(math.sqrt(irrep.size) * mapping)
+                candidate = mapping.clone()
+                if columns:
+                    occupied = torch.cat(columns, dim=1)
+                    candidate -= occupied @ (occupied.T @ candidate)
+                u, singular_values, vh = torch.linalg.svd(candidate, full_matrices=False)
+                if int((singular_values > 1e-7).sum()) != irrep.size:
+                    continue
+                columns.append(u @ vh)
                 copies.append(irrep)
+                if sum(copy is irrep for copy in copies) == multiplicity:
+                    break
         change = torch.cat(columns, dim=1) if columns else torch.empty(self.size, 0, dtype=torch.float64)
         if change.shape != (self.size, self.size):
             raise RuntimeError("restricted representation decomposition is incomplete")

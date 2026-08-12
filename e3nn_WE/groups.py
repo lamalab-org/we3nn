@@ -27,6 +27,9 @@ class GroupElement:
     def inverse(self) -> "GroupElement":
         return self.group.inverse(self)
 
+    def __repr__(self) -> str:
+        return f"{self.group.name}.element({self.value!r})"
+
 
 class _CallableInt(int):
     def __call__(self) -> int:
@@ -72,6 +75,11 @@ class FiniteGroup(Group):
 
     def __iter__(self) -> Iterator[GroupElement]:
         return iter(self._elements)
+
+    @property
+    def structural_key(self) -> tuple:
+        """Stable identity for caches and serialized construction metadata."""
+        return (type(self).__module__, type(self).__qualname__, self.name, tuple(g.value for g in self.elements))
 
     def sample(self) -> GroupElement:
         return self._elements[torch.randint(self.order(), ()).item()]

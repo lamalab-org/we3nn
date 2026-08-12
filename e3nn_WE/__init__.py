@@ -8,6 +8,7 @@ from .matrix_group import MatrixFiniteGroup
 from .intertwiner import (
     TensorProductRepresentation,
     invariant_basis,
+    find_representation_intertwiner,
     intertwiner_basis,
     subspace_diagnostics,
     subspace_distance,
@@ -51,6 +52,7 @@ __all__ = [
     "embeddings",
     "intertwiner_basis",
     "invariant_basis",
+    "find_representation_intertwiner",
     "gspaces",
     "nn",
     "planar_o3",
@@ -62,4 +64,4 @@ __all__ = [
     "tensor_product_representation",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

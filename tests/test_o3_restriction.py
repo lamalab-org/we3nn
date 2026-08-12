@@ -10,7 +10,7 @@ def test_planar_embedding_and_l1_xy_z_decomposition():
     embedding = planar_o3(group)
     assert embedding.check_embedding()
     restricted = restrict_o3(o3.Irrep("1o"), embedding)
-    assert restricted.dim == 3 and restricted.check_representation(atol=3e-6, rtol=3e-6)
+    assert restricted.dim == 3 and restricted.check_representation()
     decomposition = restricted.decompose()
     assert sorted(irrep.id for irrep in decomposition.irreps) == [(0, 0), (1, 1)]
 
@@ -23,7 +23,7 @@ def test_higher_l_d6_restrictions_decompose_and_reconstruct(degree):
     assert sum(irrep.size for irrep in decomposition.irreps) == 2 * degree + 1
     for element in group.elements:
         torch.testing.assert_close(
-            decomposition.reconstruct(element), restricted(element), atol=3e-6, rtol=3e-6
+            decomposition.reconstruct(element), restricted(element), atol=1e-10, rtol=1e-10
         )
 
 

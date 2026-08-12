@@ -22,7 +22,10 @@ class TensorProductInstruction:
     i_in1: int
     i_in2: int
     i_out: int
-    path_shape: tuple[int, ...]
+    coupling: int | None = None
+    connection_mode: str = "uvw"
+    has_weight: bool = True
+    path_shape: tuple[int, ...] = ()
     path_weight: float = 1.0
 
     @property
@@ -48,6 +51,8 @@ class _TensorProductPath(nn.Module):
         *,
         internal_weights: bool,
         path_weight: float,
+        coupling: int | None = None,
+        has_weight: bool = True,
     ):
         super().__init__()
         self.left = left
@@ -67,10 +72,47 @@ class _TensorProductPath(nn.Module):
             self.weight_shape = (output.size, left.size)
         else:
             self.kind = "cg"
-            self.weight_shape = (_generic_couplings(left, right, output).shape[0],)
-        if math.prod(self.weight_shape) == 0:
+            coupling_basis = _generic_couplings(left, right, output)
+            self.weight_shape = (coupling_basis.shape[0],)
+        if self.kind == "cg":
+            self.register_buffer("coupling_basis", coupling_basis, persistent=True)
+        else:
+            self.register_buffer("coupling_basis", torch.empty(0, dtype=torch.float64), persistent=False)
+        need_left = self.kind in {"output_regular", "right_regular"} and left is not regular
+        need_right = self.kind in {"output_regular", "left_regular"} and right is not regular
+        need_output = self.kind in {"left_regular", "right_regular"}
+        stack = lambda rep, needed: (
+            torch.stack([rep(element) for element in self.group.elements])
+            if needed
+            else torch.empty(0, dtype=torch.float64)
+        )
+        self.register_buffer("left_matrices", stack(left, need_left), persistent=False)
+        self.register_buffer("right_matrices", stack(right, need_right), persistent=False)
+        self.register_buffer("output_matrices", stack(output, need_output), persistent=False)
+        need_indices = self.kind != "cg" and (
+            (self.kind == "output_regular" and (left is regular or right is regular))
+            or (self.kind == "left_regular" and right is regular)
+            or (self.kind == "right_regular" and left is regular)
+        )
+        self.register_buffer(
+            "regular_indices",
+            _regular_indices(self.group) if need_indices else torch.empty(0, dtype=torch.long),
+            persistent=False,
+        )
+        self.full_weight_shape = self.weight_shape
+        self.coupling = coupling
+        self.has_weight = bool(has_weight)
+        full_numel = math.prod(self.full_weight_shape)
+        if full_numel == 0:
             raise ValueError("the requested tensor-product instruction has no equivariant coupling")
-        if internal_weights:
+        if coupling is not None:
+            if not 0 <= int(coupling) < full_numel:
+                raise ValueError(f"coupling index {coupling} is outside [0, {full_numel})")
+            self.coupling = int(coupling)
+            self.weight_shape = (1,)
+        if not self.has_weight and self.coupling is None and full_numel != 1:
+            raise ValueError("an unweighted instruction must select one coupling")
+        if internal_weights and self.has_weight:
             self.weight = nn.Parameter(torch.empty(self.weight_shape))
         else:
             self.register_parameter("weight", None)
@@ -78,33 +120,58 @@ class _TensorProductPath(nn.Module):
 
     @property
     def weight_numel(self) -> int:
-        return math.prod(self.weight_shape)
+        return math.prod(self.weight_shape) if self.has_weight else 0
 
     def reset_parameters(self) -> None:
         if self.weight is not None:
             bound = math.sqrt(6.0 / (self.left.size + self.right.size + self.output.size))
             nn.init.uniform_(self.weight, -bound, bound)
 
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        reference = self.weight if self.weight is not None else self.coupling_basis
+        device, dtype = reference.device, reference.dtype
+        for name, rep in (("left_matrices", self.left), ("right_matrices", self.right), ("output_matrices", self.output)):
+            current = getattr(self, name)
+            if current.numel():
+                setattr(self, name, torch.stack([rep(g) for g in self.group.elements]).to(device=device, dtype=dtype))
+        if self.kind == "cg":
+            self.coupling_basis = _generic_couplings(self.left, self.right, self.output).to(device=device, dtype=dtype)
+        return self
+
     def _matrices(self, representation: Representation, reference: torch.Tensor) -> torch.Tensor:
-        return torch.stack(
-            [representation(element) for element in self.group.elements]
-        ).to(device=reference.device, dtype=reference.dtype)
+        if representation is self.left:
+            matrices = self.left_matrices
+        elif representation is self.right:
+            matrices = self.right_matrices
+        elif representation is self.output:
+            matrices = self.output_matrices
+        else:
+            raise RuntimeError("unknown tensor-product representation")
+        return matrices.to(device=reference.device, dtype=reference.dtype)
 
     def _inverse_transforms(self, value: torch.Tensor, representation: Representation) -> torch.Tensor:
         if representation is self.group.regular_repr:
-            indices = _regular_indices(self.group).to(value.device)
+            indices = self.regular_indices
             return value[..., indices]
         matrices = self._matrices(representation, value)
         return torch.einsum("...i,qia->...qa", value, matrices)
 
     def forward(self, left: torch.Tensor, right: torch.Tensor, weight: torch.Tensor | None = None) -> torch.Tensor:
         coefficients = self.weight if weight is None else weight
-        if coefficients is None:
+        if not self.has_weight:
+            coefficients = left.new_ones((1,))
+        elif coefficients is None:
             raise RuntimeError("external tensor-product weights were not supplied")
         shared = coefficients.ndim == len(self.weight_shape)
+        if self.coupling is not None:
+            expanded_shape = (*coefficients.shape[:-1], *self.full_weight_shape)
+            expanded = coefficients.new_zeros(expanded_shape).flatten(-len(self.full_weight_shape))
+            expanded[..., self.coupling] = coefficients[..., 0]
+            coefficients = expanded.reshape(expanded_shape)
         scale = self.path_weight
         if self.kind == "cg":
-            basis = _generic_couplings(self.left, self.right, self.output).to(
+            basis = self.coupling_basis.to(
                 device=left.device, dtype=left.dtype
             )
             if shared:
@@ -192,28 +259,53 @@ class TensorProduct(nn.Module):
                     for i_in2, right in enumerate(in2_type):
                         dimension = _coupling_dimension(left, right, output)
                         if dimension:
-                            requested.append((i_in1, i_in2, i_out, 1.0))
+                            requested.append((i_in1, i_in2, i_out, None, "uvw", True, 1.0))
         else:
             for instruction in instructions:
                 if isinstance(instruction, TensorProductInstruction):
+                    if instruction.connection_mode != "uvw":
+                        raise ValueError("only connection_mode='uvw' is currently supported")
                     requested.append(
-                        (instruction.i_in1, instruction.i_in2, instruction.i_out, instruction.path_weight)
+                        (
+                            instruction.i_in1,
+                            instruction.i_in2,
+                            instruction.i_out,
+                            instruction.coupling,
+                            instruction.connection_mode,
+                            instruction.has_weight,
+                            instruction.path_weight,
+                        )
                     )
                 else:
                     if len(instruction) != 3:
                         raise ValueError("instructions must be (i_in1, i_in2, i_out) triples")
-                    requested.append((*map(int, instruction), 1.0))
+                    requested.append((*map(int, instruction), None, "uvw", True, 1.0))
 
         paths = []
         normalized_instructions = []
-        for i_in1, i_in2, i_out, path_weight in requested:
+        for i_in1, i_in2, i_out, coupling, connection_mode, has_weight, path_weight in requested:
             left, right, output = in1_type[i_in1], in2_type[i_in2], out_type[i_out]
             path = _TensorProductPath(
-                left, right, output, internal_weights=internal_weights, path_weight=path_weight
+                left,
+                right,
+                output,
+                internal_weights=internal_weights,
+                path_weight=path_weight,
+                coupling=coupling,
+                has_weight=has_weight,
             )
             paths.append(path)
             normalized_instructions.append(
-                TensorProductInstruction(i_in1, i_in2, i_out, path.weight_shape, path_weight)
+                TensorProductInstruction(
+                    i_in1,
+                    i_in2,
+                    i_out,
+                    coupling=coupling,
+                    connection_mode=connection_mode,
+                    has_weight=has_weight,
+                    path_shape=path.weight_shape,
+                    path_weight=path_weight,
+                )
             )
         self.paths = nn.ModuleList(paths)
         self.instructions = tuple(normalized_instructions)
@@ -242,7 +334,9 @@ class TensorProduct(nn.Module):
                 raise ValueError("an internally weighted TensorProduct does not accept external weights")
         else:
             expected = (self.weight_numel,) if self.shared_weights else (*input1.tensor.shape[:-1], self.weight_numel)
-            if weight is None or tuple(weight.shape) != expected:
+            if self.weight_numel == 0 and weight is None:
+                pass
+            elif weight is None or tuple(weight.shape) != expected:
                 raise ValueError(f"external weight must have shape {expected}")
 
         output = input1.tensor.new_zeros(*input1.tensor.shape[:-1], self.out_type.size)
@@ -251,7 +345,7 @@ class TensorProduct(nn.Module):
             left = input1.tensor[..., self.in1_type.fields_start[instruction.i_in1]:self.in1_type.fields_end[instruction.i_in1]]
             right = input2.tensor[..., self.in2_type.fields_start[instruction.i_in2]:self.in2_type.fields_end[instruction.i_in2]]
             external = None
-            if not self.internal_weights:
+            if not self.internal_weights and path.has_weight:
                 external = weight[..., weight_offset:weight_offset + path.weight_numel].reshape(
                     *weight.shape[:-1], *path.weight_shape
                 )
@@ -304,8 +398,13 @@ class FullyConnectedTensorProduct(TensorProduct):
 class FullTensorProduct(nn.Module):
     """Unweighted direct tensor product in the product coordinate basis."""
 
-    def __init__(self, in1_type: FieldType, in2_type: FieldType):
+    def __init__(self, in1_type: FieldType | Representation, in2_type: FieldType | Representation):
         super().__init__()
+        self._raw_tensor_api = isinstance(in1_type, Representation) and isinstance(in2_type, Representation)
+        if isinstance(in1_type, Representation):
+            in1_type = FieldType(no_base_space(in1_type.group), [in1_type])
+        if isinstance(in2_type, Representation):
+            in2_type = FieldType(no_base_space(in2_type.group), [in2_type])
         if in1_type.fibergroup is not in2_type.fibergroup:
             raise ValueError("input types must use the same group")
         self.in1_type = in1_type
@@ -315,13 +414,20 @@ class FullTensorProduct(nn.Module):
             [tensor_product_representation(in1_type.representation, in2_type.representation)],
         )
 
-    def forward(self, input1: GeometricTensor, input2: GeometricTensor) -> GeometricTensor:
+    def forward(self, input1: GeometricTensor | torch.Tensor, input2: GeometricTensor | torch.Tensor):
+        raw = isinstance(input1, torch.Tensor) and isinstance(input2, torch.Tensor)
+        if raw:
+            if not self._raw_tensor_api:
+                raise TypeError("raw tensors require construction from Representations")
+            input1 = GeometricTensor(input1, self.in1_type)
+            input2 = GeometricTensor(input2, self.in2_type)
         if input1.type != self.in1_type or input2.type != self.in2_type:
             raise TypeError("FullTensorProduct input types do not match")
         if input1.tensor.shape[:-1] != input2.tensor.shape[:-1]:
             raise ValueError("input leading dimensions must match")
         output = torch.einsum("...i,...j->...ij", input1.tensor, input2.tensor).flatten(-2)
-        return GeometricTensor(output, self.out_type)
+        result = GeometricTensor(output, self.out_type)
+        return result.tensor if raw else result
 
 
 def _coupling_dimension(left: Representation, right: Representation, output: Representation) -> int:

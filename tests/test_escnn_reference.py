@@ -13,6 +13,15 @@ except ImportError as error:
 
 from e3nn_WE import cyclic_group, dihedral_group, gspaces, nn
 from e3nn_WE import clebsch_gordan, subspace_diagnostics
+from e3nn_WE import (
+    intertwiner_basis,
+    tensor_product_representation,
+    direct_sum,
+    planar_o3,
+    restrict_o3,
+    find_representation_intertwiner,
+)
+from e3nn import o3
 
 
 @pytest.mark.parametrize("n", [3, 4, 6, 9])
@@ -65,6 +74,119 @@ def test_d6_linear_has_same_number_of_trainable_degrees_of_freedom_as_escnn():
     assert sum(parameter.numel() for parameter in our_layer.parameters()) == sum(
         parameter.numel() for parameter in esc_layer.parameters()
     )
+
+
+def test_d6_homomorphism_spaces_match_escnn_as_subspaces():
+    from escnn import group as escnn_group
+
+    reference = escnn_gspaces.flipRot2dOnR2(N=6).fibergroup
+    ours = dihedral_group(6)
+    pairs = [
+        (ours.trivial_irrep, ours.trivial_irrep, reference.irrep(0, 0), reference.irrep(0, 0)),
+        (ours.trivial_irrep, ours.irrep(1, 1), reference.irrep(0, 0), reference.irrep(1, 1)),
+        (ours.irrep(1, 1), ours.trivial_irrep, reference.irrep(1, 1), reference.irrep(0, 0)),
+        (ours.irrep(1, 1), ours.irrep(1, 1), reference.irrep(1, 1), reference.irrep(1, 1)),
+        (ours.regular_repr, ours.irrep(1, 1), reference.regular_representation, reference.irrep(1, 1)),
+        (ours.irrep(1, 1), ours.regular_repr, reference.irrep(1, 1), reference.regular_representation),
+        (ours.regular_repr, ours.regular_repr, reference.regular_representation, reference.regular_representation),
+        (
+            direct_sum([ours.regular_repr, ours.regular_repr]),
+            ours.regular_repr,
+            escnn_group.directsum([reference.regular_representation, reference.regular_representation]),
+            reference.regular_representation,
+        ),
+    ]
+    for our_in, our_out, ref_in, ref_out in pairs:
+        our_basis = intertwiner_basis(our_in, our_out)
+        reference_basis = torch.from_numpy(escnn_group.homomorphism_space(ref_in, ref_out)).to(torch.float64)
+        assert our_basis.shape == reference_basis.shape
+        diagnostics = subspace_diagnostics(our_basis, reference_basis)
+        assert diagnostics["projector_error"] < 2e-8, diagnostics
+
+
+def test_d6_regular_relu_forward_matches_escnn():
+    reference_space = escnn_gspaces.no_base_space(escnn_gspaces.flipRot2dOnR2(N=6).fibergroup)
+    ours_space = gspaces.no_base_space(gspaces.flipRot2dOnR2(N=6).fibergroup)
+    reference_type = escnn_nn.FieldType(reference_space, [reference_space.regular_repr])
+    ours_type = nn.FieldType(ours_space, [ours_space.regular_repr])
+    x = torch.randn(17, 12)
+    actual = nn.ReLU(ours_type)(nn.GeometricTensor(x, ours_type)).tensor
+    expected = escnn_nn.ReLU(reference_type)(escnn_nn.GeometricTensor(x, reference_type)).tensor
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("degree", range(5))
+def test_restricted_o3_representations_match_escnn_up_to_one_basis(degree):
+    from escnn import group as escnn_group
+
+    ours_group = dihedral_group(6)
+    ours = restrict_o3(
+        o3.Irrep(degree, (-1) ** degree),
+        planar_o3(ours_group),
+    )
+    parent = escnn_group.o3_group()
+    reference_group, _, _ = parent.subgroup(("cone", 6))
+    reference = parent.irrep(degree % 2, degree).restrict(("cone", 6))
+    wrapped = ours_group.representation(
+        {
+            element: reference(reference_element)
+            for element, reference_element in zip(ours_group.elements, reference_group.elements)
+        },
+        name=f"escnn-restricted-l{degree}",
+    )
+    for element in ours_group.elements:
+        np.testing.assert_allclose(ours.character(element), wrapped.character(element), atol=2e-8)
+    transform = find_representation_intertwiner(wrapped, ours, atol=2e-7)
+    for element in ours_group.elements:
+        torch.testing.assert_close(
+            ours(element) @ transform,
+            transform @ wrapped(element),
+            atol=2e-7,
+            rtol=2e-7,
+        )
+
+
+def test_restricted_wigner_eckart_coupling_space_matches_escnn():
+    from escnn import group as escnn_group
+
+    ours_group = dihedral_group(6)
+    embedding = planar_o3(ours_group)
+    parent = escnn_group.o3_group()
+    reference_group, _, _ = parent.subgroup(("cone", 6))
+    degrees = (1, 2, 1)
+    ours_reps = [restrict_o3(o3.Irrep(l, (-1) ** l), embedding) for l in degrees]
+    reference_reps = [parent.irrep(l % 2, l).restrict(("cone", 6)) for l in degrees]
+    wrapped_reps = [
+        ours_group.representation(
+            {
+                element: reference(reference_element)
+                for element, reference_element in zip(ours_group.elements, reference_group.elements)
+            },
+            name=f"escnn-restricted-l{degree}",
+        )
+        for degree, reference in zip(degrees, reference_reps)
+    ]
+    transforms = [
+        find_representation_intertwiner(wrapped, ours, atol=2e-7)
+        for wrapped, ours in zip(wrapped_reps, ours_reps)
+    ]
+    ours_basis = intertwiner_basis(
+        tensor_product_representation(ours_reps[0], ours_reps[1]),
+        ours_reps[2],
+    )
+    reference_basis = torch.from_numpy(
+        escnn_group.homomorphism_space(reference_reps[0].tensor(reference_reps[1]), reference_reps[2])
+    ).to(torch.float64)
+    input_transform = torch.kron(transforms[0], transforms[1])
+    transported = torch.einsum(
+        "oa,pab,ib->poi",
+        transforms[2],
+        reference_basis,
+        input_transform,
+    )
+    diagnostics = subspace_diagnostics(ours_basis, transported)
+    assert ours_basis.shape == transported.shape
+    assert diagnostics["projector_error"] < 3e-7, diagnostics
 
 
 @pytest.mark.parametrize("kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)])

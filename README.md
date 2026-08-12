@@ -1,8 +1,21 @@
 # e3nn_WE
 
-Validated development base: e3nn `0.6.0` and PyTorch `2.13.0`. The finite
+Validated development base: e3nn `0.6.0` (upstream tag commit
+`2aa7f58440a06b15352a2cbce01fa4c26f824969`) and PyTorch `2.13.0`. The finite
 subsystem is parallel to `e3nn.o3`; it does not modify O(3)'s `Irrep`,
 `Irreps`, or `TensorProduct` behavior.
+
+The preferred generic API is available directly beside upstream e3nn:
+
+```python
+from e3nn import group
+
+G = group.DihedralGroup(6)
+layer = group.nn.Linear(G.standard_representation(), G.regular_representation())
+```
+
+The historical `e3nn_WE` imports remain supported for the escnn-compatible
+surface used by `mp_example.py`.
 
 `e3nn_WE` extends e3nn's typed-representation approach to the finite planar
 groups C_n (rotations) and D_n (rotations and reflections). Its no-base-space

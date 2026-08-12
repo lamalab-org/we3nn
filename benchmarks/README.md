@@ -24,3 +24,5 @@ profiler for production workloads.
 `finite_ops.py` additionally benchmarks construction, forward, and backward
 for 1/4/16 D6 regular-field linear maps plus E1 x E1 and regular x E1 tensor
 products. It also reports learnable parameter counts and tensor storage.
+The same script benchmarks construction, forward, and backward for the full
+D6 message layer (including radial features and both scatter conventions).

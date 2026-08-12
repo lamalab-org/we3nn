@@ -32,3 +32,27 @@ def test_raw_tensor_tensor_product_api():
     product = nn.TensorProduct(vector, vector, scalar)
     x, y = torch.randn(4, 2), torch.randn(4, 2)
     assert product(x, y).shape == (4, 1)
+
+
+def test_e3nn_group_namespace_and_upstream_o3_coexist():
+    from e3nn import group, o3
+
+    finite = group.DihedralGroup(6)
+    assert finite.order == 12
+    assert o3.Irrep("1o").dim == 3
+    value = group.nn.Linear(finite.trivial_irrep, finite.regular_representation())(
+        torch.randn(3, 1)
+    )
+    assert value.shape == (3, 12)
+
+
+def test_full_tensor_product_raw_api_and_instruction_metadata():
+    group = DihedralGroup(4)
+    vector = group.standard_representation()
+    full = nn.FullTensorProduct(vector, vector)
+    x, y = torch.randn(5, 2), torch.randn(5, 2)
+    torch.testing.assert_close(full(x, y), torch.einsum("...i,...j->...ij", x, y).flatten(-2))
+    product = nn.TensorProduct(vector, vector, group.trivial_irrep)
+    instruction = product.instructions[0]
+    assert instruction.connection_mode == "uvw"
+    assert instruction.has_weight and instruction.coupling is None

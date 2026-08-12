@@ -1,6 +1,7 @@
 import torch
 
 from mp_example import EquivariantMPLayer
+from e3nn_WE.utils import scatter
 
 
 def test_actual_message_passing_layer_forward_backward_and_d6_equivariance():
@@ -43,3 +44,27 @@ def test_actual_message_passing_layer_forward_backward_and_d6_equivariance():
             torch.testing.assert_close(
                 transformed_forces, expected_forces, atol=2e-11, rtol=2e-11
             )
+
+
+def test_message_layer_preserves_supplied_row_force_col_feature_scatter_convention():
+    torch.manual_seed(12)
+    layer = EquivariantMPLayer(2, 4, torch.nn.ReLU()).double()
+    h = torch.randn(5, 2, dtype=torch.float64)
+    pos = torch.randn(5, 3, dtype=torch.float64)
+    anchor = torch.randn(5, 2, dtype=torch.float64)
+    edge_index = torch.tensor([[0, 0, 2, 3, 4], [1, 2, 4, 1, 0]])
+    row, col = edge_index
+    r_ij, rsq, radial = layer.compute_distances(pos, edge_index)
+    message = layer.node_message_function(
+        h[row], h[col], rsq, radial, anchor[row], r_ij[:, :2], r_ij[:, 2:3]
+    )
+    edge_h = layer.enn_scalar_out(message).tensor
+    edge_force = torch.cat(
+        (layer.enn_vector_out(message).tensor, layer.enn_z_out(message).tensor), dim=-1
+    )
+    actual_h, actual_force = layer(h, pos, anchor, edge_index)
+    torch.testing.assert_close(actual_force, scatter(edge_force, row, dim=0, reduce="sum"))
+    torch.testing.assert_close(
+        actual_h,
+        scatter(edge_h, col, dim=0, reduce="sum") + layer.residual_proj(h),
+    )

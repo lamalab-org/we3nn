@@ -77,3 +77,22 @@ def test_cached_factories_preserve_group_identity_required_by_types():
     assert cyclic_group(8) is cyclic_group(8)
     assert dihedral_group(8) is dihedral_group(8)
     assert CyclicGroup(3) is not CyclicGroup(3)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "group",
+    [
+        *(cyclic_group(n) for n in (1, 2, 3, 4, 5, 6, 8)),
+        *(dihedral_group(n) for n in (2, 3, 4, 5, 6, 8)),
+    ],
+)
+def test_full_target_matrix_exhaustive_axioms_and_representations(group):
+    for a in group.elements:
+        assert a * group.identity == a == group.identity * a
+        assert a * a.inverse() == group.identity
+        for b in group.elements:
+            for c in group.elements:
+                assert (a * b) * c == a * (b * c)
+    for representation in (*group.irreps(), group.regular_representation()):
+        assert representation.check_representation()

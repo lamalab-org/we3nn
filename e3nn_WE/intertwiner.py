@@ -27,10 +27,7 @@ def _nullspace(matrix: torch.Tensor) -> torch.Tensor:
         return torch.eye(matrix.shape[1], dtype=matrix.dtype)
     _, singular_values, vh = torch.linalg.svd(matrix, full_matrices=True)
     sigma_max = float(singular_values.max()) if singular_values.numel() else 0.0
-    # Restricted e3nn Wigner-D matrices currently carry angle-extraction
-    # residuals around 1e-6 even in float64. The absolute floor separates
-    # those numerical null directions from the O(1) constraint spectrum.
-    tolerance = max(1e-5, 32.0 * max(matrix.shape) * torch.finfo(matrix.dtype).eps * max(sigma_max, 1.0))
+    tolerance = 32.0 * max(matrix.shape) * torch.finfo(matrix.dtype).eps * max(sigma_max, 1.0)
     rank = int((singular_values > tolerance).sum())
     return vh[rank:]
 
@@ -53,7 +50,7 @@ def _intertwiner_cpu(rep_in: Representation, rep_out: Representation, method: st
             projected.append(average.reshape(-1))
         span = torch.stack(projected)
         _, singular_values, vh = torch.linalg.svd(span, full_matrices=False)
-        tolerance = max(1e-5, 32.0 * max(span.shape) * torch.finfo(span.dtype).eps * max(float(singular_values.max()), 1.0))
+        tolerance = 32.0 * max(span.shape) * torch.finfo(span.dtype).eps * max(float(singular_values.max()), 1.0)
         basis = vh[: int((singular_values > tolerance).sum())]
     else:
         constraints = []
@@ -63,8 +60,36 @@ def _intertwiner_cpu(rep_in: Representation, rep_out: Representation, method: st
                 for candidate in elementary
             ]
             constraints.append(torch.stack(residuals, dim=1))
-        basis = _nullspace(torch.cat(constraints, dim=0))
+        constraint = torch.cat(constraints, dim=0)
+        # Restricted O(3) matrices inherit the numerical error of e3nn's
+        # matrix-to-angle conversion. Estimate that defect from the supplied
+        # representation itself instead of imposing a global absolute cutoff.
+        defect = max(_representation_defect(rep_in), _representation_defect(rep_out))
+        if defect:
+            _, singular_values, vh = torch.linalg.svd(constraint, full_matrices=True)
+            scale = max(float(torch.linalg.matrix_norm(constraint, ord=2)), 1.0)
+            tolerance = (
+                32.0 * max(constraint.shape) * torch.finfo(constraint.dtype).eps * scale
+                + 8.0 * math.sqrt(len(group_elements)) * defect
+            )
+            rank = int((singular_values > tolerance).sum())
+            basis = vh[rank:]
+        else:
+            basis = _nullspace(constraint)
     return _canonicalize(basis.reshape(-1, *shape))
+
+
+def _representation_defect(rep: Representation) -> float:
+    """Maximum generator homomorphism/orthogonality residual in float64."""
+    identity = torch.eye(rep.size, dtype=torch.float64)
+    error = 0.0
+    for generator in rep.group.generators:
+        matrix = rep(generator)
+        error = max(error, float((matrix.T @ matrix - identity).abs().max()))
+        for other in rep.group.generators:
+            expected = rep(rep.group.combine(generator, other))
+            error = max(error, float((expected - matrix @ rep(other)).abs().max()))
+    return error
 
 
 def intertwiner_basis(
@@ -116,6 +141,13 @@ def subspace_diagnostics(first: torch.Tensor, second: torch.Tensor) -> dict:
         "dimension_first": first_q.shape[1],
         "dimension_second": second_q.shape[1],
         "singular_values": singular_values.tolist(),
+        "smallest_singular_value": float(singular_values.min()) if singular_values.numel() else None,
+        "largest_singular_value": float(singular_values.max()) if singular_values.numel() else None,
+        "condition_number": (
+            float(singular_values.max() / singular_values.min())
+            if singular_values.numel() and float(singular_values.min()) > 0
+            else None
+        ),
         "largest_principal_angle": largest_angle,
         "projector_error": projector_error,
     }
@@ -123,3 +155,33 @@ def subspace_diagnostics(first: torch.Tensor, second: torch.Tensor) -> dict:
 
 def subspace_distance(first: torch.Tensor, second: torch.Tensor) -> float:
     return float(subspace_diagnostics(first, second)["projector_error"])
+
+
+def find_representation_intertwiner(
+    source_rep: Representation,
+    target_rep: Representation,
+    *,
+    atol: float = 1e-8,
+) -> torch.Tensor:
+    """Return one orthogonal global basis transform between equivalent reps."""
+    if source_rep.dim != target_rep.dim:
+        raise ValueError("equivalent representations must have equal dimensions")
+    basis = intertwiner_basis(source_rep, target_rep)
+    if not basis.shape[0]:
+        raise ValueError("representations are not equivalent")
+    coefficients = torch.arange(1, basis.shape[0] + 1, dtype=torch.float64)
+    candidate = torch.einsum("q,qoi->oi", coefficients, basis)
+    if torch.linalg.matrix_rank(candidate) != source_rep.dim:
+        for index in range(basis.shape[0]):
+            candidate = basis[index]
+            if torch.linalg.matrix_rank(candidate) == source_rep.dim:
+                break
+        else:
+            raise ValueError("intertwiner space contains no invertible equivalence")
+    u, _, vh = torch.linalg.svd(candidate)
+    transform = u @ vh
+    for element in source_rep.group.elements:
+        residual = target_rep(element) @ transform - transform @ source_rep(element)
+        if float(residual.abs().max()) > atol:
+            raise ValueError("representations are not orthogonally equivalent within tolerance")
+    return transform

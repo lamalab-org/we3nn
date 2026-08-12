@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from e3nn_WE import CircularHarmonics, RestrictedSphericalHarmonics, cyclic_group, dihedral_group
+from e3nn_WE import CircularHarmonics, RestrictedSphericalHarmonics, cyclic_group, dihedral_group, planar_o3
 
 
 def _transform_angles(group, angles, element):
@@ -65,3 +65,16 @@ def test_restricted_e3nn_spherical_harmonics_are_equivariant(group):
         torch.testing.assert_close(actual, expected, atol=4e-6, rtol=4e-6)
     output.tensor.square().mean().backward()
     assert vectors.grad is not None and torch.isfinite(vectors.grad).all()
+
+
+def test_restricted_spherical_harmonics_finite_irrep_basis():
+    group = dihedral_group(6)
+    module = RestrictedSphericalHarmonics(group, [0, 1, 2, 3], basis="finite_irreps")
+    vectors = torch.randn(9, 3, dtype=torch.float64)
+    output = module(vectors)
+    assert all(rep.is_irreducible for rep in output.type)
+    embedding = planar_o3(group)
+    for element in group.elements:
+        actual = module(vectors @ embedding.matrix(element).T).tensor
+        expected = output.transform_fibers(element).tensor
+        torch.testing.assert_close(actual, expected, atol=8e-6, rtol=8e-6)
