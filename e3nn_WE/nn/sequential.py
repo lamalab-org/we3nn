@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from collections import OrderedDict
-
+import torch
 from torch import nn
 
-from .geometric_tensor import GeometricTensor
 
 
 class SequentialModule(nn.Sequential):
-    """Type-checking counterpart of ``torch.nn.Sequential`` for geometric tensors."""
+    """Representation-aware ``torch.nn.Sequential`` operating on tensors."""
 
     def __init__(self, *args):
         super().__init__(*args)
@@ -23,9 +21,9 @@ class SequentialModule(nn.Sequential):
         self.in_type = modules[0].in_type
         self.out_type = modules[-1].out_type
 
-    def forward(self, input: GeometricTensor) -> GeometricTensor:
-        if not isinstance(input, GeometricTensor) or input.type != self.in_type:
-            raise TypeError(f"expected a GeometricTensor of type {self.in_type!r}")
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if not isinstance(input, torch.Tensor) or input.shape[-1] != self.in_type.size:
+            raise TypeError(f"expected a tensor with final dimension {self.in_type.size}")
         return super().forward(input)
 
     def evaluate_output_shape(self, input_shape: tuple[int, ...]) -> tuple[int, ...]:

@@ -11,7 +11,6 @@ from e3nn import o3
 from .groups import CyclicGroup, DihedralGroup, FiniteGroup
 from .gspaces import GSpace, no_base_space
 from .nn.field_type import FieldType
-from .nn.geometric_tensor import GeometricTensor
 from .representations import Representation
 from .embedding import O3Embedding, planar_o3, restrict_o3
 
@@ -90,7 +89,7 @@ class CircularHarmonics(nn.Module):
             torch.as_tensor(scalar_scale, device=device, dtype=dtype),
         )
 
-    def forward(self, angles: torch.Tensor) -> GeometricTensor:
+    def forward(self, angles: torch.Tensor) -> torch.Tensor:
         if not isinstance(angles, torch.Tensor) or not angles.is_floating_point():
             raise TypeError("angles must be a floating-point torch.Tensor")
         values = []
@@ -103,9 +102,9 @@ class CircularHarmonics(nn.Module):
                 values.append((scalar_scale * torch.cos(phase)).unsqueeze(-1))
             else:
                 values.append((scalar_scale * torch.sin(phase)).unsqueeze(-1))
-        return GeometricTensor(torch.cat(values, dim=-1), self.out_type)
+        return torch.cat(values, dim=-1)
 
-    def from_vectors(self, vectors: torch.Tensor) -> GeometricTensor:
+    def from_vectors(self, vectors: torch.Tensor) -> torch.Tensor:
         if vectors.shape[-1] != 2:
             raise ValueError("vectors must have final dimension 2")
         return self(torch.atan2(vectors[..., 1], vectors[..., 0]))
@@ -118,7 +117,7 @@ def circular_harmonics(
     normalization: str = "component",
 ) -> torch.Tensor:
     """Functional circular harmonics returning an untyped tensor."""
-    return CircularHarmonics(group, max_frequency, normalization)(angles).tensor
+    return CircularHarmonics(group, max_frequency, normalization)(angles)
 
 
 class RestrictedSphericalHarmonics(nn.Module):
@@ -127,7 +126,7 @@ class RestrictedSphericalHarmonics(nn.Module):
     C_n and D_n are embedded in O(3) by acting on ``(x, y)`` and leaving
     ``z`` fixed. The numerical harmonics are computed by
     :func:`e3nn.o3.spherical_harmonics`; this wrapper supplies their exact
-    restricted finite-group representation as a :class:`FieldType`.
+    restricted finite-group representation as module metadata.
     """
 
     def __init__(
@@ -178,7 +177,7 @@ class RestrictedSphericalHarmonics(nn.Module):
         self.register_buffer("change_to_output_basis", change_inv, persistent=True)
         self.rep_out = self.out_type.representation
 
-    def forward(self, vectors: torch.Tensor) -> GeometricTensor:
+    def forward(self, vectors: torch.Tensor) -> torch.Tensor:
         if vectors.shape[-1] != 3 or not vectors.is_floating_point():
             raise ValueError("vectors must be a floating-point tensor with final dimension 3")
         values = [
@@ -192,7 +191,7 @@ class RestrictedSphericalHarmonics(nn.Module):
         ]
         values = torch.cat(values, dim=-1)
         change = self.change_to_output_basis.to(device=values.device, dtype=values.dtype)
-        return GeometricTensor(values @ change.T, self.out_type)
+        return values @ change.T
 
 
 def spherical_harmonics(
@@ -206,4 +205,4 @@ def spherical_harmonics(
     """Functional restricted e3nn spherical harmonics."""
     return RestrictedSphericalHarmonics(
         group, degrees, normalize=normalize, normalization=normalization
-    )(vectors).tensor
+    )(vectors)

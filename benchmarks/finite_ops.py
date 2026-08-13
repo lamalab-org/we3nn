@@ -34,13 +34,13 @@ def benchmark_linear(fields):
     module = nn.Linear(type_, type_)
     construction = (time.perf_counter_ns() - start) / 1e6
     tensor = torch.randn(512, type_.size, requires_grad=True)
-    value = nn.GeometricTensor(tensor, type_)
+    value = tensor
     forward = timed(lambda: module(value))
 
     def backward():
         module.zero_grad(set_to_none=True)
         tensor.grad = None
-        module(value).tensor.square().mean().backward()
+        module(value).square().mean().backward()
 
     backward_ms = timed(backward, repeats=10)
     print(
@@ -61,8 +61,8 @@ def benchmark_tensor_product():
         start = time.perf_counter_ns()
         module = nn.TensorProduct(left, right, output)
         construction = (time.perf_counter_ns() - start) / 1e6
-        x = nn.GeometricTensor(torch.randn(512, left.size), left)
-        y = nn.GeometricTensor(torch.randn(512, right.size), right)
+        x = torch.randn(512, left.size)
+        y = torch.randn(512, right.size)
         print(
             f"TensorProduct {name}: construct={construction:.3f} ms, "
             f"forward={timed(lambda: module(x,y)):.3f} ms, "

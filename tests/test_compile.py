@@ -15,11 +15,10 @@ def test_linear_and_tensor_product_compile_smoke_outputs_and_gradients():
     compiled_product = torch.compile(product, backend="eager")
     left_tensor = torch.randn(3, 2, requires_grad=True)
     right_tensor = torch.randn(3, 2, requires_grad=True)
-    left = nn.GeometricTensor(left_tensor, vector)
-    right = nn.GeometricTensor(right_tensor, vector)
-    torch.testing.assert_close(compiled_linear(left).tensor, linear(left).tensor)
-    torch.testing.assert_close(compiled_product(left, right).tensor, product(left, right).tensor)
-    (compiled_linear(left).tensor.sum() + compiled_product(left, right).tensor.sum()).backward()
+    left, right = left_tensor, right_tensor
+    torch.testing.assert_close(compiled_linear(left), linear(left))
+    torch.testing.assert_close(compiled_product(left, right), product(left, right))
+    (compiled_linear(left).sum() + compiled_product(left, right).sum()).backward()
     assert left_tensor.grad is not None and right_tensor.grad is not None
 
 

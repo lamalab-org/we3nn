@@ -1,4 +1,6 @@
 import torch
+import importlib
+import pytest
 
 from e3nn_WE import DihedralGroup, nn
 
@@ -65,3 +67,11 @@ def test_explicit_full_finite_coupling_api():
     public = finite.clebsch_gordan(group.irrep(1), group.irrep(1), group.trivial_irrep)
     full = finite.finite_group_couplings(group.irrep(1), group.irrep(1), group.trivial_irrep)
     assert full.shape[0] >= public.shape[0]
+
+
+def test_tensor_wrapper_is_not_part_of_library():
+    from e3nn import group
+
+    assert not hasattr(group.nn, "GeometricTensor")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("e3nn_WE.nn.geometric_tensor")

@@ -28,8 +28,8 @@ def test_actual_message_passing_layer_forward_backward_and_d6_equivariance():
     assert all(parameter.grad is not None for parameter in layer.parameters())
 
     with torch.no_grad():
-        for element in layer.s.fibergroup.elements:
-            matrix = layer.s.irrep(1, 1)(element).to(dtype=torch.float64)
+        for element in layer.group.elements:
+            matrix = layer.group.standard_representation()(element).to(dtype=torch.float64)
             transformed_pos = pos.detach().clone()
             transformed_pos[:, :2] = pos.detach()[:, :2] @ matrix.T
             transformed_anchor = anchor.detach() @ matrix.T
@@ -58,9 +58,9 @@ def test_message_layer_preserves_supplied_row_force_col_feature_scatter_conventi
     message = layer.node_message_function(
         h[row], h[col], rsq, radial, anchor[row], r_ij[:, :2], r_ij[:, 2:3]
     )
-    edge_h = layer.enn_scalar_out(message).tensor
+    edge_h = layer.enn_scalar_out(message)
     edge_force = torch.cat(
-        (layer.enn_vector_out(message).tensor, layer.enn_z_out(message).tensor), dim=-1
+        (layer.enn_vector_out(message), layer.enn_z_out(message)), dim=-1
     )
     actual_h, actual_force = layer(h, pos, anchor, edge_index)
     torch.testing.assert_close(actual_force, scatter(edge_force, row, dim=0, reduce="sum"))

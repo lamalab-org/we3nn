@@ -60,7 +60,7 @@ def main() -> None:
         nn.Linear(our_out, our_out),
     )
     tensor = torch.randn(edges, our_in.size)
-    our_input = nn.GeometricTensor(tensor, our_in)
+    our_input = tensor
     our_ms = median_forward_ms(lambda: our_layer(our_input))
     our_storage = storage_bytes(our_layer)
     our_python_peak = peak_python_bytes(lambda: our_layer(our_input))

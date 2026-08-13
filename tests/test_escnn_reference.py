@@ -110,7 +110,7 @@ def test_d6_regular_relu_forward_matches_escnn():
     reference_type = escnn_nn.FieldType(reference_space, [reference_space.regular_repr])
     ours_type = nn.FieldType(ours_space, [ours_space.regular_repr])
     x = torch.randn(17, 12)
-    actual = nn.ReLU(ours_type)(nn.GeometricTensor(x, ours_type)).tensor
+    actual = nn.ReLU(ours_type)(x)
     expected = escnn_nn.ReLU(reference_type)(escnn_nn.GeometricTensor(x, reference_type)).tensor
     torch.testing.assert_close(actual, expected)
 
@@ -250,7 +250,7 @@ def test_synchronized_d6_linear_forward_matches_escnn():
             parameter.copy_(coefficients[offset:offset + parameter.numel()].reshape_as(parameter))
             offset += parameter.numel()
     x = torch.randn(37, our_in.size, dtype=torch.float64)
-    ours_output = our_layer(nn.GeometricTensor(x, our_in)).tensor
+    ours_output = our_layer(x)
     reference_output = esc_layer(escnn_nn.GeometricTensor(x, esc_in)).tensor
     # escnn constructs this basis in float32 before module.double(), so the
     # synchronized physical operator retains a few e-8 of source rounding.
@@ -307,18 +307,18 @@ def test_synchronized_d6_message_trunk_and_heads_match_escnn_at_every_stage():
         _synchronize_linear(ours_layer, esc_layer)
 
     tensor = torch.randn(31, our_in.size, dtype=torch.float64)
-    ours_value = nn.GeometricTensor(tensor, our_in)
+    ours_value = tensor
     esc_value = escnn_nn.GeometricTensor(tensor, esc_in)
     for index, (ours_layer, esc_layer) in enumerate(zip(our_trunk_linears, esc_trunk_linears)):
         ours_value, esc_value = ours_layer(ours_value), esc_layer(esc_value)
-        torch.testing.assert_close(ours_value.tensor, esc_value.tensor, atol=2e-6, rtol=2e-6)
+        torch.testing.assert_close(ours_value, esc_value.tensor, atol=2e-6, rtol=2e-6)
         if index < 3:
             ours_value = nn.ReLU(our_hidden)(ours_value)
             esc_value = escnn_nn.ReLU(esc_hidden)(esc_value)
-            torch.testing.assert_close(ours_value.tensor, esc_value.tensor, atol=2e-6, rtol=2e-6)
+            torch.testing.assert_close(ours_value, esc_value.tensor, atol=2e-6, rtol=2e-6)
 
     torch.testing.assert_close(
-        our_scalar_head(ours_value).tensor,
+        our_scalar_head(ours_value),
         esc_scalar_head(esc_value).tensor,
         atol=2e-6,
         rtol=2e-6,
@@ -329,9 +329,9 @@ def test_synchronized_d6_message_trunk_and_heads_match_escnn_at_every_stage():
     ):
         ours_head = nn.ELU(ours_type)(ours_lines[0](ours_value))
         esc_head = escnn_nn.ELU(esc_type)(esc_lines[0](esc_value))
-        torch.testing.assert_close(ours_head.tensor, esc_head.tensor, atol=2e-6, rtol=2e-6)
+        torch.testing.assert_close(ours_head, esc_head.tensor, atol=2e-6, rtol=2e-6)
         torch.testing.assert_close(
-            ours_lines[1](ours_head).tensor,
+            ours_lines[1](ours_head),
             esc_lines[1](esc_head).tensor,
             atol=2e-6,
             rtol=2e-6,

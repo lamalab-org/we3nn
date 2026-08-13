@@ -17,7 +17,11 @@ layer = group.nn.Linear(G.standard_representation(), G.regular_representation())
 The historical `e3nn_WE` imports remain supported for the escnn-compatible
 surface used by `mp_example.py`.
 
-`e3nn_WE` extends e3nn's typed-representation approach to the finite planar
+All finite-group modules consume and return ordinary `torch.Tensor` objects.
+Representation metadata is stored on the modules; no tensor wrapper is part
+of the library API.
+
+`e3nn_WE` extends e3nn's representation approach to the finite planar
 groups C_n (rotations) and D_n (rotations and reflections). Its no-base-space
 API intentionally mirrors the small part of escnn used by `mp_example.py`, so
 that example only needs this import change:
@@ -56,12 +60,12 @@ scalars_and_vectors = nn.FieldType(
 )
 regular = nn.FieldType(space, 4 * [space.regular_repr])
 
-model = nn.SequentialModule(
+model = torch.nn.Sequential(
     nn.Linear(scalars_and_vectors, regular),
     nn.ReLU(regular),
     nn.Linear(regular, scalars_and_vectors),
 )
-x = nn.GeometricTensor(torch.randn(32, scalars_and_vectors.size), scalars_and_vectors)
+x = torch.randn(32, scalars_and_vectors.size)
 y = model(x)
 ```
 

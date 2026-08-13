@@ -5,11 +5,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .field_type import FieldType
-from .geometric_tensor import GeometricTensor
+from .field_type import FieldType, as_field_type
 from .tensor_product import TensorProduct
 from ..representations import Representation
-from ..gspaces import no_base_space
 
 
 class WignerEckartTensorProduct(nn.Module):
@@ -17,13 +15,12 @@ class WignerEckartTensorProduct(nn.Module):
 
     def __init__(self, rep_in: FieldType | Representation, rep_filter: FieldType | Representation, rep_out: FieldType | Representation, *, shared_weights: bool = False):
         super().__init__()
-        self._raw_tensor_api = all(isinstance(rep, Representation) for rep in (rep_in, rep_filter, rep_out))
         if isinstance(rep_in, Representation):
-            rep_in = FieldType(no_base_space(rep_in.group), [rep_in])
+            rep_in = as_field_type(rep_in)
         if isinstance(rep_filter, Representation):
-            rep_filter = FieldType(no_base_space(rep_filter.group), [rep_filter])
+            rep_filter = as_field_type(rep_filter)
         if isinstance(rep_out, Representation):
-            rep_out = FieldType(no_base_space(rep_out.group), [rep_out])
+            rep_out = as_field_type(rep_out)
         self.rep_in = rep_in
         self.rep_filter = rep_filter
         self.rep_out = rep_out
@@ -41,18 +38,11 @@ class WignerEckartTensorProduct(nn.Module):
 
     def forward(
         self,
-        features: GeometricTensor,
-        filter_features: GeometricTensor,
+        features: torch.Tensor,
+        filter_features: torch.Tensor,
         reduced_weights: torch.Tensor,
-    ) -> GeometricTensor:
-        raw = isinstance(features, torch.Tensor) and isinstance(filter_features, torch.Tensor)
-        if raw:
-            if not self._raw_tensor_api:
-                raise TypeError("raw tensors require construction from Representations")
-            features = GeometricTensor(features, self.rep_in)
-            filter_features = GeometricTensor(filter_features, self.rep_filter)
-        output = self.tensor_product(features, filter_features, reduced_weights)
-        return output.tensor if raw else output
+    ) -> torch.Tensor:
+        return self.tensor_product(features, filter_features, reduced_weights)
 
 
 class RestrictedWignerEckartTensorProduct(WignerEckartTensorProduct):

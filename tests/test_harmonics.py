@@ -21,8 +21,8 @@ def test_circular_harmonics_are_equivariant(group, normalization):
     angles = torch.linspace(-2.7, 2.8, 23, dtype=torch.float64)
     output = module(angles)
     for element in group.elements:
-        actual = module(_transform_angles(group, angles, element)).tensor
-        expected = output.transform_fibers(element).tensor
+        actual = module(_transform_angles(group, angles, element))
+        expected = module.out_type.transform_fibers(output, element)
         torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
 
 
@@ -31,8 +31,8 @@ def test_harmonics_from_vectors_and_gradients():
     vectors = torch.randn(17, 2, dtype=torch.float64, requires_grad=True)
     from_vectors = module.from_vectors(vectors)
     angles = torch.atan2(vectors[:, 1], vectors[:, 0])
-    torch.testing.assert_close(from_vectors.tensor, module(angles).tensor)
-    from_vectors.tensor.square().sum().backward()
+    torch.testing.assert_close(from_vectors, module(angles))
+    from_vectors.square().sum().backward()
     assert vectors.grad is not None
     assert torch.isfinite(vectors.grad).all()
 
@@ -58,12 +58,12 @@ def test_restricted_e3nn_spherical_harmonics_are_equivariant(group):
         planar = group.standard_representation(element)
         matrix = torch.eye(3, dtype=torch.float64)
         matrix[:2, :2] = planar
-        actual = module(vectors.detach() @ matrix.T).tensor
-        expected = output.transform_fibers(element).tensor.detach()
+        actual = module(vectors.detach() @ matrix.T)
+        expected = module.out_type.transform_fibers(output, element).detach()
         # e3nn's Wigner-D construction uses angle extraction with numerical
         # tolerances; its float64 restricted action is accurate to a few e-6.
         torch.testing.assert_close(actual, expected, atol=4e-6, rtol=4e-6)
-    output.tensor.square().mean().backward()
+    output.square().mean().backward()
     assert vectors.grad is not None and torch.isfinite(vectors.grad).all()
 
 
@@ -72,9 +72,9 @@ def test_restricted_spherical_harmonics_finite_irrep_basis():
     module = RestrictedSphericalHarmonics(group, [0, 1, 2, 3], basis="finite_irreps")
     vectors = torch.randn(9, 3, dtype=torch.float64)
     output = module(vectors)
-    assert all(rep.is_irreducible for rep in output.type)
+    assert all(rep.is_irreducible for rep in module.out_type)
     embedding = planar_o3(group)
     for element in group.elements:
-        actual = module(vectors @ embedding.matrix(element).T).tensor
-        expected = output.transform_fibers(element).tensor
+        actual = module(vectors @ embedding.matrix(element).T)
+        expected = module.out_type.transform_fibers(output, element)
         torch.testing.assert_close(actual, expected, atol=8e-6, rtol=8e-6)

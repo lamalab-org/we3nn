@@ -17,13 +17,11 @@ def _assert_module_equivariant(module, input_type, group, *, atol=2e-5):
     reference = next(module.parameters(), None)
     if reference is None:
         reference = next(module.buffers())
-    x = nn.GeometricTensor(
-        torch.randn(5, input_type.size, device=reference.device, dtype=reference.dtype), input_type
-    )
+    x = torch.randn(5, input_type.size, device=reference.device, dtype=reference.dtype)
     y = module(x)
     for element in group.elements:
-        actual = module(x.transform_fibers(element)).tensor
-        expected = y.transform_fibers(element).tensor
+        actual = module(input_type.transform_fibers(x, element))
+        expected = module.out_type.transform_fibers(y, element)
         torch.testing.assert_close(actual, expected, atol=atol, rtol=atol)
 
 
@@ -44,9 +42,9 @@ def test_linear_and_regular_nonlinearity_equivariance(kind, n):
 def test_linear_gradients_reach_every_parameter():
     _, input_type, regular_type = _types("dihedral", 6)
     layer = nn.Linear(input_type, regular_type)
-    x = nn.GeometricTensor(torch.randn(7, input_type.size, requires_grad=True), input_type)
-    layer(x).tensor.square().mean().backward()
-    assert x.tensor.grad is not None
+    x = torch.randn(7, input_type.size, requires_grad=True)
+    layer(x).square().mean().backward()
+    assert x.grad is not None
     assert all(parameter.grad is not None for parameter in layer.parameters())
     assert all(torch.isfinite(parameter.grad).all() for parameter in layer.parameters())
 
@@ -69,9 +67,7 @@ def test_pointwise_rejects_vector_irrep():
 def test_type_and_shape_errors_are_early():
     space, input_type, regular_type = _types("dihedral", 6)
     with pytest.raises(ValueError, match="last dimension"):
-        nn.GeometricTensor(torch.randn(2, input_type.size + 1), input_type)
-    with pytest.raises(TypeError, match="expected"):
-        nn.Linear(input_type, regular_type)(nn.GeometricTensor(torch.randn(2, regular_type.size), regular_type))
+        nn.Linear(input_type, regular_type)(torch.randn(2, input_type.size + 1))
 
 
 def test_large_group_regular_setup_uses_quadratic_permutation_indices():
@@ -91,12 +87,12 @@ def test_double_rebuilds_intertwiner_basis_at_float64_precision():
     input_type = nn.FieldType(space, [space.irrep(1), space.regular_repr, space.irrep(0)])
     output_type = nn.FieldType(space, [space.regular_repr, space.irrep(1)])
     layer = nn.Linear(input_type, output_type).double()
-    x = nn.GeometricTensor(torch.randn(4, input_type.size, dtype=torch.float64), input_type)
+    x = torch.randn(4, input_type.size, dtype=torch.float64)
     y = layer(x)
     for element in space.fibergroup.elements:
         torch.testing.assert_close(
-            layer(x.transform_fibers(element)).tensor,
-            y.transform_fibers(element).tensor,
+            layer(input_type.transform_fibers(x, element)),
+            output_type.transform_fibers(y, element),
             atol=2e-12,
             rtol=2e-12,
         )
@@ -108,8 +104,8 @@ def test_valid_parameterless_zero_map_tracks_dtype_and_device():
     output_type = nn.FieldType(space, [space.irrep(1, 2)])
     layer = nn.Linear(input_type, output_type, bias=True).double()
     assert sum(parameter.numel() for parameter in layer.parameters()) == 0
-    x = nn.GeometricTensor(torch.randn(3, input_type.size, dtype=torch.float64), input_type)
-    assert torch.equal(layer(x).tensor, torch.zeros(3, output_type.size, dtype=torch.float64))
+    x = torch.randn(3, input_type.size, dtype=torch.float64)
+    assert torch.equal(layer(x), torch.zeros(3, output_type.size, dtype=torch.float64))
     _assert_module_equivariant(layer, input_type, space.fibergroup, atol=1e-12)
 
 
@@ -134,3 +130,17 @@ def test_generic_and_structured_linear_backends_span_same_maps():
                     parameter.reshape(-1)[index] = 0
         bases.append(torch.linalg.qr(torch.stack(columns, dim=1), mode="reduced").Q)
     torch.testing.assert_close(bases[0] @ bases[0].T, bases[1] @ bases[1].T, atol=1e-10, rtol=1e-10)
+
+
+def test_no_grad_linear_cache_invalidates_after_parameter_update():
+    _, input_type, regular_type = _types("dihedral", 6)
+    layer = nn.Linear(input_type, regular_type)
+    x = torch.randn(4, input_type.size)
+    with torch.no_grad():
+        before = layer(x)
+        assert layer._inference_weight.numel() > 0
+        next(layer.parameters()).add_(0.25)
+        after = layer(x)
+    assert not torch.allclose(before, after)
+    with torch.enable_grad():
+        torch.testing.assert_close(after, layer(x))

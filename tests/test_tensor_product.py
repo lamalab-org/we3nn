@@ -6,9 +6,12 @@ from e3nn_WE import gspaces, nn
 
 def _assert_equivariant(module, input1, input2, atol=3e-10):
     output = module(input1, input2)
-    for element in input1.type.fibergroup.elements:
-        actual = module(input1.transform_fibers(element), input2.transform_fibers(element)).tensor
-        expected = output.transform_fibers(element).tensor
+    for element in module.in1_type.fibergroup.elements:
+        actual = module(
+            module.in1_type.transform_fibers(input1, element),
+            module.in2_type.transform_fibers(input2, element),
+        )
+        expected = module.out_type.transform_fibers(output, element)
         torch.testing.assert_close(actual, expected, atol=atol, rtol=atol)
 
 
@@ -21,11 +24,11 @@ def test_irrep_fully_connected_tensor_product(kind, n):
     in2 = nn.FieldType(space, list(reversed(irreps)))
     out = nn.FieldType(space, irreps)
     module = nn.FullyConnectedTensorProduct(in1, in2, out).double()
-    x = nn.GeometricTensor(torch.randn(4, in1.size, dtype=torch.float64, requires_grad=True), in1)
-    y = nn.GeometricTensor(torch.randn(4, in2.size, dtype=torch.float64, requires_grad=True), in2)
+    x = torch.randn(4, in1.size, dtype=torch.float64, requires_grad=True)
+    y = torch.randn(4, in2.size, dtype=torch.float64, requires_grad=True)
     _assert_equivariant(module, x, y)
-    module(x, y).tensor.square().mean().backward()
-    assert x.tensor.grad is not None and y.tensor.grad is not None
+    module(x, y).square().mean().backward()
+    assert x.grad is not None and y.grad is not None
     assert all(parameter.grad is not None for parameter in module.parameters())
 
 
@@ -43,8 +46,8 @@ def test_analytic_regular_tensor_product_paths(regular_position):
         nn.FieldType(space, [output_rep]),
     )
     module = nn.TensorProduct(in1, in2, out).double()
-    x = nn.GeometricTensor(torch.randn(3, in1.size, dtype=torch.float64), in1)
-    y = nn.GeometricTensor(torch.randn(3, in2.size, dtype=torch.float64), in2)
+    x = torch.randn(3, in1.size, dtype=torch.float64)
+    y = torch.randn(3, in2.size, dtype=torch.float64)
     _assert_equivariant(module, x, y)
 
 
@@ -52,21 +55,21 @@ def test_external_shared_and_unshared_weights():
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(5).fibergroup)
     type_ = nn.FieldType(space, [space.irrep(1, 1)])
     out = nn.FieldType(space, [space.irrep(0, 0), space.irrep(1, 2)])
-    x = nn.GeometricTensor(torch.randn(6, type_.size), type_)
-    y = nn.GeometricTensor(torch.randn(6, type_.size), type_)
+    x = torch.randn(6, type_.size)
+    y = torch.randn(6, type_.size)
     shared = nn.TensorProduct(type_, type_, out, internal_weights=False)
     shared_weight = torch.randn(shared.weight_numel)
     result = shared(x, y, shared_weight)
     for element in space.fibergroup.elements:
         torch.testing.assert_close(
-            shared(x.transform_fibers(element), y.transform_fibers(element), shared_weight).tensor,
-            result.transform_fibers(element).tensor,
+            shared(type_.transform_fibers(x, element), type_.transform_fibers(y, element), shared_weight),
+            out.transform_fibers(result, element),
             atol=2e-5,
             rtol=2e-5,
         )
     unshared = nn.TensorProduct(type_, type_, out, internal_weights=False, shared_weights=False)
     unshared_weight = torch.randn(6, unshared.weight_numel)
-    assert unshared(x, y, unshared_weight).tensor.shape == (6, out.size)
+    assert unshared(x, y, unshared_weight).shape == (6, out.size)
 
 
 def test_instruction_subset_and_shape_errors():
@@ -78,8 +81,8 @@ def test_instruction_subset_and_shape_errors():
     assert module.evaluate_output_shape((2, 3, 1), (2, 3, 2)) == (2, 3, 2)
     with pytest.raises(ValueError, match="matching"):
         module(
-            nn.GeometricTensor(torch.randn(2, 1), scalar),
-            nn.GeometricTensor(torch.randn(3, 2), vector),
+            torch.randn(2, 1),
+            torch.randn(3, 2),
         )
 
 
@@ -88,8 +91,8 @@ def test_full_tensor_product_product_basis_equivariance():
     left = nn.FieldType(space, [space.irrep(1, 1), space.irrep(0, 0)])
     right = nn.FieldType(space, [space.irrep(1, 2)])
     module = nn.FullTensorProduct(left, right)
-    x = nn.GeometricTensor(torch.randn(5, left.size), left)
-    y = nn.GeometricTensor(torch.randn(5, right.size), right)
+    x = torch.randn(5, left.size)
+    y = torch.randn(5, right.size)
     _assert_equivariant(module, x, y, atol=2e-5)
 
 
@@ -103,11 +106,7 @@ def test_tensor_product_gradcheck_inputs_and_external_weights():
     weights = torch.randn(2, module.weight_numel, dtype=torch.float64, requires_grad=True)
 
     def function(left_tensor, right_tensor, weight_tensor):
-        return module(
-            nn.GeometricTensor(left_tensor, vector),
-            nn.GeometricTensor(right_tensor, vector),
-            weight_tensor,
-        ).tensor
+        return module(left_tensor, right_tensor, weight_tensor)
 
     assert torch.autograd.gradcheck(function, (left, right, weights), atol=1e-6, rtol=1e-5)
 

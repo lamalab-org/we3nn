@@ -6,7 +6,7 @@ from functools import cached_property
 import torch
 
 from ..gspaces import GSpace
-from ..representations import Representation, direct_sum
+from ..representations import DirectSumRepresentation, Representation, direct_sum
 
 
 class FieldType(Sequence[Representation]):
@@ -65,3 +65,13 @@ class FieldType(Sequence[Representation]):
     def __repr__(self) -> str:
         reps = ", ".join(rep.name for rep in self.representations)
         return f"FieldType({self.gspace.name}, [{reps}])"
+
+
+def as_field_type(representation: Representation) -> FieldType:
+    """Expose direct-sum blocks to structured kernels without wrapping tensors."""
+    representations = (
+        representation.representations
+        if isinstance(representation, DirectSumRepresentation)
+        else (representation,)
+    )
+    return FieldType(GSpace(representation.group), representations)

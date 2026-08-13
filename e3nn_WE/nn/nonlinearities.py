@@ -6,10 +6,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .field_type import FieldType
-from .geometric_tensor import GeometricTensor
+from .field_type import FieldType, as_field_type
 from ..representations import Representation
-from ..gspaces import no_base_space
 
 
 class PointwiseNonLinearity(nn.Module):
@@ -28,10 +26,12 @@ class PointwiseNonLinearity(nn.Module):
         self.out_type = in_type
         self.function = function
 
-    def forward(self, input: GeometricTensor) -> GeometricTensor:
-        if not isinstance(input, GeometricTensor) or input.type != self.in_type:
-            raise TypeError(f"expected a GeometricTensor of type {self.in_type!r}")
-        return GeometricTensor(self.function(input.tensor), self.out_type)
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if not isinstance(input, torch.Tensor):
+            raise TypeError("pointwise activations expect an ordinary torch.Tensor")
+        if input.shape[-1] != self.in_type.size:
+            raise ValueError(f"expected last dimension {self.in_type.size}, got {input.shape[-1]}")
+        return self.function(input)
 
     def evaluate_output_shape(self, input_shape: tuple[int, ...]) -> tuple[int, ...]:
         return input_shape
@@ -54,19 +54,9 @@ class PointwiseActivation(PointwiseNonLinearity):
     """Generic pointwise activation accepting a Representation and raw tensors."""
 
     def __init__(self, representation: FieldType | Representation, activation: Callable[[torch.Tensor], torch.Tensor]):
-        self._raw_tensor_api = isinstance(representation, Representation)
         field_type = (
-            FieldType(no_base_space(representation.group), [representation])
-            if self._raw_tensor_api
+            as_field_type(representation)
+            if isinstance(representation, Representation)
             else representation
         )
         super().__init__(field_type, activation)
-
-    def forward(self, input):
-        raw = isinstance(input, torch.Tensor)
-        if raw:
-            if not self._raw_tensor_api:
-                raise TypeError("raw tensors require construction from a Representation")
-            input = GeometricTensor(input, self.in_type)
-        output = super().forward(input)
-        return output.tensor if raw else output

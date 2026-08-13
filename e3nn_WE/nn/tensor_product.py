@@ -12,9 +12,7 @@ from torch import nn
 from ..clebsch_gordan import clebsch_gordan, full_coupling_basis
 from ..representations import Irrep, Representation
 from ..intertwiner import intertwiner_basis, tensor_product_representation
-from .field_type import FieldType
-from .geometric_tensor import GeometricTensor
-from ..gspaces import no_base_space
+from .field_type import FieldType, as_field_type
 
 
 @dataclass(frozen=True)
@@ -211,7 +209,7 @@ class _TensorProductPath(nn.Module):
 
 
 class TensorProduct(nn.Module):
-    """A complete equivariant bilinear map between finite-group FieldTypes.
+    """A complete equivariant bilinear map on ordinary PyTorch tensors.
 
     By default, every compatible triple of input/output fields is included.
     ``instructions`` may instead contain ``(i_in1, i_in2, i_out)`` triples or
@@ -235,13 +233,12 @@ class TensorProduct(nn.Module):
         shared_weights: bool = True,
     ):
         super().__init__()
-        self._raw_tensor_api = all(isinstance(value, Representation) for value in (in1_type, in2_type, out_type))
         if isinstance(in1_type, Representation):
-            in1_type = FieldType(no_base_space(in1_type.group), [in1_type])
+            in1_type = as_field_type(in1_type)
         if isinstance(in2_type, Representation):
-            in2_type = FieldType(no_base_space(in2_type.group), [in2_type])
+            in2_type = as_field_type(in2_type)
         if isinstance(out_type, Representation):
-            out_type = FieldType(no_base_space(out_type.group), [out_type])
+            out_type = as_field_type(out_type)
         if in1_type.fibergroup is not in2_type.fibergroup or in1_type.fibergroup is not out_type.fibergroup:
             raise ValueError("all FieldTypes must use the same group instance")
         if internal_weights and not shared_weights:
@@ -313,37 +310,31 @@ class TensorProduct(nn.Module):
 
     def forward(
         self,
-        input1: GeometricTensor | torch.Tensor,
-        input2: GeometricTensor | torch.Tensor,
+        input1: torch.Tensor,
+        input2: torch.Tensor,
         weight: torch.Tensor | None = None,
-    ) -> GeometricTensor:
-        raw = isinstance(input1, torch.Tensor) and isinstance(input2, torch.Tensor)
-        if raw:
-            if not self._raw_tensor_api:
-                raise TypeError("raw tensors require TensorProduct construction from Representations")
-            input1 = GeometricTensor(input1, self.in1_type)
-            input2 = GeometricTensor(input2, self.in2_type)
-        if not isinstance(input1, GeometricTensor) or input1.type != self.in1_type:
-            raise TypeError(f"input1 must have type {self.in1_type!r}")
-        if not isinstance(input2, GeometricTensor) or input2.type != self.in2_type:
-            raise TypeError(f"input2 must have type {self.in2_type!r}")
-        if input1.tensor.shape[:-1] != input2.tensor.shape[:-1]:
+    ) -> torch.Tensor:
+        if not isinstance(input1, torch.Tensor) or not isinstance(input2, torch.Tensor):
+            raise TypeError("TensorProduct expects ordinary torch.Tensor inputs")
+        if input1.shape[-1] != self.in1_type.size or input2.shape[-1] != self.in2_type.size:
+            raise ValueError("tensor-product input feature dimensions do not match the representations")
+        if input1.shape[:-1] != input2.shape[:-1]:
             raise ValueError("tensor-product inputs must have matching leading dimensions")
         if self.internal_weights:
             if weight is not None:
                 raise ValueError("an internally weighted TensorProduct does not accept external weights")
         else:
-            expected = (self.weight_numel,) if self.shared_weights else (*input1.tensor.shape[:-1], self.weight_numel)
+            expected = (self.weight_numel,) if self.shared_weights else (*input1.shape[:-1], self.weight_numel)
             if self.weight_numel == 0 and weight is None:
                 pass
             elif weight is None or tuple(weight.shape) != expected:
                 raise ValueError(f"external weight must have shape {expected}")
 
-        output = input1.tensor.new_zeros(*input1.tensor.shape[:-1], self.out_type.size)
+        output = input1.new_zeros(*input1.shape[:-1], self.out_type.size)
         weight_offset = 0
         for instruction, path in zip(self.instructions, self.paths):
-            left = input1.tensor[..., self.in1_type.fields_start[instruction.i_in1]:self.in1_type.fields_end[instruction.i_in1]]
-            right = input2.tensor[..., self.in2_type.fields_start[instruction.i_in2]:self.in2_type.fields_end[instruction.i_in2]]
+            left = input1[..., self.in1_type.fields_start[instruction.i_in1]:self.in1_type.fields_end[instruction.i_in1]]
+            right = input2[..., self.in2_type.fields_start[instruction.i_in2]:self.in2_type.fields_end[instruction.i_in2]]
             external = None
             if not self.internal_weights and path.has_weight:
                 external = weight[..., weight_offset:weight_offset + path.weight_numel].reshape(
@@ -353,8 +344,7 @@ class TensorProduct(nn.Module):
             value = path(left, right, external)
             start, end = self.out_type.fields_start[instruction.i_out], self.out_type.fields_end[instruction.i_out]
             output[..., start:end] = output[..., start:end] + value
-        result = GeometricTensor(output, self.out_type)
-        return result.tensor if raw else result
+        return output
 
     def evaluate_output_shape(self, input1_shape: tuple[int, ...], input2_shape: tuple[int, ...]) -> tuple[int, ...]:
         if input1_shape[:-1] != input2_shape[:-1]:
@@ -369,12 +359,8 @@ class TensorProduct(nn.Module):
         if reference is None:
             reference = torch.empty(0)
         shape = (3,)
-        left = GeometricTensor(
-            torch.randn(*shape, self.in1_type.size, device=reference.device, dtype=reference.dtype), self.in1_type
-        )
-        right = GeometricTensor(
-            torch.randn(*shape, self.in2_type.size, device=reference.device, dtype=reference.dtype), self.in2_type
-        )
+        left = torch.randn(*shape, self.in1_type.size, device=reference.device, dtype=reference.dtype)
+        right = torch.randn(*shape, self.in2_type.size, device=reference.device, dtype=reference.dtype)
         external = None
         if not self.internal_weights:
             weight_shape = (self.weight_numel,) if self.shared_weights else (*shape, self.weight_numel)
@@ -382,8 +368,12 @@ class TensorProduct(nn.Module):
         output = self(left, right, external)
         errors = []
         for element in self.in1_type.fibergroup.elements:
-            actual = self(left.transform_fibers(element), right.transform_fibers(element), external).tensor
-            expected = output.transform_fibers(element).tensor
+            actual = self(
+                self.in1_type.transform_fibers(left, element),
+                self.in2_type.transform_fibers(right, element),
+                external,
+            )
+            expected = self.out_type.transform_fibers(output, element)
             error = float((actual - expected).abs().max())
             if not torch.allclose(actual, expected, atol=atol, rtol=rtol):
                 raise AssertionError(f"tensor-product equivariance failed for {element}: {error:.3e}")
@@ -400,11 +390,10 @@ class FullTensorProduct(nn.Module):
 
     def __init__(self, in1_type: FieldType | Representation, in2_type: FieldType | Representation):
         super().__init__()
-        self._raw_tensor_api = isinstance(in1_type, Representation) and isinstance(in2_type, Representation)
         if isinstance(in1_type, Representation):
-            in1_type = FieldType(no_base_space(in1_type.group), [in1_type])
+            in1_type = as_field_type(in1_type)
         if isinstance(in2_type, Representation):
-            in2_type = FieldType(no_base_space(in2_type.group), [in2_type])
+            in2_type = as_field_type(in2_type)
         if in1_type.fibergroup is not in2_type.fibergroup:
             raise ValueError("input types must use the same group")
         self.in1_type = in1_type
@@ -414,20 +403,14 @@ class FullTensorProduct(nn.Module):
             [tensor_product_representation(in1_type.representation, in2_type.representation)],
         )
 
-    def forward(self, input1: GeometricTensor | torch.Tensor, input2: GeometricTensor | torch.Tensor):
-        raw = isinstance(input1, torch.Tensor) and isinstance(input2, torch.Tensor)
-        if raw:
-            if not self._raw_tensor_api:
-                raise TypeError("raw tensors require construction from Representations")
-            input1 = GeometricTensor(input1, self.in1_type)
-            input2 = GeometricTensor(input2, self.in2_type)
-        if input1.type != self.in1_type or input2.type != self.in2_type:
-            raise TypeError("FullTensorProduct input types do not match")
-        if input1.tensor.shape[:-1] != input2.tensor.shape[:-1]:
+    def forward(self, input1: torch.Tensor, input2: torch.Tensor) -> torch.Tensor:
+        if not isinstance(input1, torch.Tensor) or not isinstance(input2, torch.Tensor):
+            raise TypeError("FullTensorProduct expects ordinary torch.Tensor inputs")
+        if input1.shape[-1] != self.in1_type.size or input2.shape[-1] != self.in2_type.size:
+            raise ValueError("FullTensorProduct feature dimensions do not match")
+        if input1.shape[:-1] != input2.shape[:-1]:
             raise ValueError("input leading dimensions must match")
-        output = torch.einsum("...i,...j->...ij", input1.tensor, input2.tensor).flatten(-2)
-        result = GeometricTensor(output, self.out_type)
-        return result.tensor if raw else result
+        return torch.einsum("...i,...j->...ij", input1, input2).flatten(-2)
 
 
 def _coupling_dimension(left: Representation, right: Representation, output: Representation) -> int:

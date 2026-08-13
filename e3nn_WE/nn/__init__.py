@@ -1,7 +1,6 @@
-"""Typed equivariant PyTorch modules for finite groups."""
+"""Equivariant PyTorch tensor modules for finite groups."""
 
 from .field_type import FieldType
-from .geometric_tensor import GeometricTensor
 from .linear import Linear
 from .nonlinearities import ELU, ReLU, PointwiseActivation, PointwiseNonLinearity
 from .sequential import SequentialModule
@@ -11,7 +10,6 @@ from .wigner_eckart import RestrictedWignerEckartTensorProduct, WignerEckartTens
 __all__ = [
     "ELU",
     "FieldType",
-    "GeometricTensor",
     "FullyConnectedTensorProduct",
     "FullTensorProduct",
     "Linear",

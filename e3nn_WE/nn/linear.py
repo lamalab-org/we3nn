@@ -1,4 +1,4 @@
-"""All finite-group equivariant linear maps between two FieldTypes."""
+"""Finite-group equivariant linear maps on ordinary PyTorch tensors."""
 
 from __future__ import annotations
 
@@ -12,9 +12,7 @@ from torch.nn import functional as F
 
 from ..representations import Representation
 from ..intertwiner import intertwiner_basis as generic_intertwiner_basis
-from ..gspaces import no_base_space
-from .field_type import FieldType
-from .geometric_tensor import GeometricTensor
+from .field_type import FieldType, as_field_type
 
 
 @lru_cache(maxsize=None)
@@ -155,6 +153,26 @@ class _PairExpansion(nn.Module):
         else:
             weight[self.rows[:, None, :, None], self.columns[None, :, None, :]] = blocks
 
+    @property
+    def is_contiguous(self) -> bool:
+        return (
+            self._row_slice is not None
+            and self._column_slice is not None
+        )
+
+    def dense_block(self) -> torch.Tensor:
+        """Expand a contiguous field-pair block without an indexed write."""
+        if not self.is_contiguous:
+            raise RuntimeError("field-pair block is not contiguous")
+        if self._regular_to_regular:
+            blocks = self.coefficients[..., self.relative] / math.sqrt(self.out_rep.group.order())
+        else:
+            blocks = torch.einsum("rcp,poi->rcoi", self.coefficients, self.basis)
+        return blocks.permute(0, 2, 1, 3).reshape(
+            self.coefficients.shape[0] * self.out_size,
+            self.coefficients.shape[1] * self.in_size,
+        )
+
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
         if not self._regular_to_regular:
@@ -199,6 +217,11 @@ class _BiasExpansion(nn.Module):
         else:
             bias[self.rows] = values
 
+    def dense_block(self) -> torch.Tensor:
+        if self._row_slice is None:
+            raise RuntimeError("bias block is not contiguous")
+        return torch.einsum("cp,po->co", self.coefficients, self.basis).reshape(-1)
+
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
         trivial = self.out_rep.group.trivial_representation
@@ -229,17 +252,19 @@ class Linear(nn.Module):
         if backend not in {"auto", "structured", "generic"}:
             raise ValueError("backend must be 'auto', 'structured', or 'generic'")
         self.backend = "structured" if backend == "auto" else backend
-        self._raw_tensor_api = isinstance(in_type, Representation) and isinstance(out_type, Representation)
         if isinstance(in_type, Representation):
-            in_type = FieldType(no_base_space(in_type.group), [in_type])
+            in_type = as_field_type(in_type)
         if isinstance(out_type, Representation):
-            out_type = FieldType(no_base_space(out_type.group), [out_type])
+            out_type = as_field_type(out_type)
         if in_type.fibergroup is not out_type.fibergroup:
             raise ValueError("input and output FieldTypes must use the same group instance")
         self.in_type = in_type
         self.out_type = out_type
         self.space = in_type.gspace
         self.register_buffer("_anchor", torch.empty(0), persistent=False)
+        self.register_buffer("_inference_weight", torch.empty(0), persistent=False)
+        self.register_buffer("_inference_bias", torch.empty(0), persistent=False)
+        self._inference_versions = None
 
         pair_occurrences: dict[tuple[Representation, Representation], tuple[list[int], list[int]]] = {}
         for out_rep, row in zip(out_type, out_type.fields_start):
@@ -287,26 +312,69 @@ class Linear(nn.Module):
 
     def expand_parameters(self) -> tuple[torch.Tensor, torch.Tensor | None]:
         reference = self._anchor
-        weight = reference.new_zeros(self.out_type.size, self.in_type.size)
-        for pair in self._pairs:
-            pair.write_into(weight)
-        bias_tensor = reference.new_zeros(self.out_type.size) if self.bias else None
+        tiled_pairs = sorted(self._pairs, key=lambda pair: pair._column_slice.start if pair._column_slice else -1)
+        tile_end = 0
+        complete_tiling = bool(tiled_pairs)
+        for pair in tiled_pairs:
+            complete_tiling = complete_tiling and (
+                pair.is_contiguous
+                and pair._row_slice.start == 0
+                and pair._row_slice.stop == self.out_type.size
+                and pair._column_slice.start == tile_end
+            )
+            if not complete_tiling:
+                break
+            tile_end = pair._column_slice.stop
+        complete_tiling = complete_tiling and tile_end == self.in_type.size
+        if complete_tiling:
+            blocks = [pair.dense_block() for pair in tiled_pairs]
+            weight = blocks[0] if len(blocks) == 1 else torch.cat(blocks, dim=1)
+        else:
+            weight = reference.new_zeros(self.out_type.size, self.in_type.size)
+            for pair in self._pairs:
+                pair.write_into(weight)
+        complete_bias = (
+            self.bias
+            and len(self._biases) == 1
+            and self._biases[0]._row_slice is not None
+            and self._biases[0]._row_slice.start == 0
+            and self._biases[0]._row_slice.stop == self.out_type.size
+        )
+        bias_tensor = self._biases[0].dense_block() if complete_bias else (
+            reference.new_zeros(self.out_type.size) if self.bias else None
+        )
         if bias_tensor is not None:
-            for bias in self._biases:
-                bias.write_into(bias_tensor)
+            if not complete_bias:
+                for bias in self._biases:
+                    bias.write_into(bias_tensor)
         return weight, bias_tensor
 
-    def forward(self, input: GeometricTensor | torch.Tensor) -> GeometricTensor | torch.Tensor:
-        raw = isinstance(input, torch.Tensor)
-        if raw:
-            if not self._raw_tensor_api:
-                raise TypeError("raw tensor input is only accepted when Linear was built from Representations")
-            input = GeometricTensor(input, self.in_type)
-        if not isinstance(input, GeometricTensor) or input.type != self.in_type:
-            raise TypeError(f"Linear expected a GeometricTensor of type {self.in_type!r}")
-        weight, bias = self.expand_parameters()
-        output = GeometricTensor(F.linear(input.tensor, weight, bias), self.out_type)
-        return output.tensor if raw else output
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if not isinstance(input, torch.Tensor):
+            raise TypeError("Linear expects an ordinary torch.Tensor")
+        if input.shape[-1] != self.in_type.size:
+            raise ValueError(f"expected last dimension {self.in_type.size}, got {input.shape[-1]}")
+        if torch.is_grad_enabled():
+            weight, bias = self.expand_parameters()
+        else:
+            versions = tuple(parameter._version for parameter in self.parameters())
+            if versions != self._inference_versions:
+                weight, bias = self.expand_parameters()
+                self._inference_weight = weight.detach()
+                self._inference_bias = (
+                    bias.detach() if bias is not None else self._anchor.new_empty(0)
+                )
+                self._inference_versions = versions
+            weight = self._inference_weight
+            bias = self._inference_bias if self.bias else None
+        return F.linear(input, weight, bias)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        self._inference_weight = self._anchor.new_empty(0)
+        self._inference_bias = self._anchor.new_empty(0)
+        self._inference_versions = None
+        return self
 
     def evaluate_output_shape(self, input_shape: tuple[int, ...]) -> tuple[int, ...]:
         if input_shape[-1] != self.in_type.size:
@@ -316,12 +384,11 @@ class Linear(nn.Module):
     @torch.no_grad()
     def check_equivariance(self, atol: float = 1e-6, rtol: float = 1e-5) -> list[tuple[object, float]]:
         x = torch.randn(4, self.in_type.size, device=self._anchor.device, dtype=self._anchor.dtype)
-        input = GeometricTensor(x, self.in_type)
-        output = self(input)
+        output = self(x)
         errors = []
         for element in self.space.fibergroup.testing_elements:
-            transformed = self(input.transform_fibers(element)).tensor
-            expected = output.transform_fibers(element).tensor
+            transformed = self(self.in_type.transform_fibers(x, element))
+            expected = self.out_type.transform_fibers(output, element)
             error = float((transformed - expected).abs().max())
             if not torch.allclose(transformed, expected, atol=atol, rtol=rtol):
                 raise AssertionError(f"equivariance failed for {element}: max error {error:.3e}")

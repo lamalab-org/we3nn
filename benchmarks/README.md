@@ -8,8 +8,8 @@ Reference run on Apple Silicon with PyTorch 2.13.0 and escnn 1.0.11:
 
 | implementation | median forward | persistent tensor storage |
 | --- | ---: | ---: |
-| e3nn_WE | 0.687 ms | 78.7 KiB |
-| escnn | 0.696 ms | 570.1 KiB |
+| e3nn_WE | 0.528 ms | 537.3 KiB |
+| escnn | 0.726 ms | 570.1 KiB |
 
 The script exits unsuccessfully if e3nn_WE exceeds escnn by more than a 5%
 timing-noise allowance or uses more persistent parameter/buffer storage.
@@ -20,6 +20,10 @@ Persistent storage counts parameters and registered buffers. The script also
 reports peak Python allocations via `tracemalloc`; tensor allocator peak
 memory is backend-specific and should be measured with the relevant CPU/GPU
 profiler for production workloads.
+
+The reported e3nn_WE storage includes version-invalidated expanded operators
+cached during `no_grad()` inference. Training remains fully differentiable
+and expands directly from the minimal learnable intertwiner coefficients.
 
 `finite_ops.py` additionally benchmarks construction, forward, and backward
 for 1/4/16 D6 regular-field linear maps plus E1 x E1 and regular x E1 tensor
