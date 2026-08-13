@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from e3nn_WE import gspaces, nn
+from e3nn import group
 
 
 def timed(function, repeats=30):
@@ -28,12 +28,12 @@ def storage(module):
 
 
 def benchmark_linear(fields):
-    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
-    type_ = nn.FieldType(space, fields * [space.regular_repr])
+    symmetry = group.DihedralGroup(6)
+    representation = fields * symmetry.regular_representation()
     start = time.perf_counter_ns()
-    module = nn.Linear(type_, type_)
+    module = group.nn.Linear(representation, representation)
     construction = (time.perf_counter_ns() - start) / 1e6
-    tensor = torch.randn(512, type_.size, requires_grad=True)
+    tensor = torch.randn(512, representation.dim, requires_grad=True)
     value = tensor
     forward = timed(lambda: module(value))
 
@@ -51,18 +51,18 @@ def benchmark_linear(fields):
 
 
 def benchmark_tensor_product():
-    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
-    vector = nn.FieldType(space, [space.irrep(1, 1)])
-    regular = nn.FieldType(space, [space.regular_repr])
+    symmetry = group.DihedralGroup(6)
+    vector = symmetry.standard_representation()
+    regular = symmetry.regular_representation()
     for name, left, right, output in (
         ("E1 x E1", vector, vector, regular),
         ("regular x E1", regular, vector, regular),
     ):
         start = time.perf_counter_ns()
-        module = nn.TensorProduct(left, right, output)
+        module = group.nn.TensorProduct(left, right, output)
         construction = (time.perf_counter_ns() - start) / 1e6
-        x = torch.randn(512, left.size)
-        y = torch.randn(512, right.size)
+        x = torch.randn(512, left.dim)
+        y = torch.randn(512, right.dim)
         print(
             f"TensorProduct {name}: construct={construction:.3f} ms, "
             f"forward={timed(lambda: module(x,y)):.3f} ms, "

@@ -11,6 +11,19 @@ def test_message_layer_uses_the_requested_regular_activation():
         assert layer.message_mlp_en[index].function is activation
 
 
+def test_message_layer_preserves_isolated_nodes_in_output_shapes():
+    layer = EquivariantMPLayer(2, 4, torch.nn.ReLU())
+    h = torch.randn(6, 2)
+    pos = torch.randn(6, 3)
+    anchor = torch.randn(6, 2)
+    # Node 5 is absent from both source and destination indices.
+    edges = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]])
+    scalar, force = layer(h, pos, anchor, edges)
+    assert scalar.shape == (6, 4)
+    assert force.shape == (6, 3)
+    torch.testing.assert_close(force[5], torch.zeros(3))
+
+
 def test_actual_message_passing_layer_forward_backward_and_d6_equivariance():
     torch.manual_seed(7)
     nodes, in_channels, hidden_channels = 9, 5, 8

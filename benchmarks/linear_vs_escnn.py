@@ -12,7 +12,7 @@ import tracemalloc
 
 import torch
 
-from e3nn_WE import gspaces, nn
+from e3nn import group
 
 
 def storage_bytes(module: torch.nn.Module) -> int:
@@ -47,19 +47,19 @@ def main() -> None:
     edges, in_channels, hidden_channels = 2048, 16, 32
     scalar_inputs = 2 * in_channels + 1 + 16 + 1
 
-    our_space = gspaces.no_base_space(gspaces.flipRot2dOnR2(N=6).fibergroup)
-    our_in = nn.FieldType(our_space, scalar_inputs * [our_space.irrep(0, 0)] + 2 * [our_space.irrep(1, 1)])
-    our_out = nn.FieldType(our_space, (hidden_channels // 2) * [our_space.regular_repr])
-    our_layer = nn.SequentialModule(
-        nn.Linear(our_in, our_out),
-        nn.ReLU(our_out),
-        nn.Linear(our_out, our_out),
-        nn.ReLU(our_out),
-        nn.Linear(our_out, our_out),
-        nn.ReLU(our_out),
-        nn.Linear(our_out, our_out),
+    symmetry = group.DihedralGroup(6)
+    our_in = scalar_inputs * symmetry.trivial_irrep + 2 * symmetry.standard_representation()
+    our_out = (hidden_channels // 2) * symmetry.regular_representation()
+    our_layer = torch.nn.Sequential(
+        group.nn.Linear(our_in, our_out),
+        group.nn.PointwiseActivation(our_out, torch.relu),
+        group.nn.Linear(our_out, our_out),
+        group.nn.PointwiseActivation(our_out, torch.relu),
+        group.nn.Linear(our_out, our_out),
+        group.nn.PointwiseActivation(our_out, torch.relu),
+        group.nn.Linear(our_out, our_out),
     )
-    tensor = torch.randn(edges, our_in.size)
+    tensor = torch.randn(edges, our_in.dim)
     our_input = tensor
     our_ms = median_forward_ms(lambda: our_layer(our_input))
     our_storage = storage_bytes(our_layer)

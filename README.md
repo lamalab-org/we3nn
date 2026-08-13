@@ -5,7 +5,7 @@ Validated development base: e3nn `0.6.0` (upstream tag commit
 subsystem is parallel to `e3nn.o3`; it does not modify O(3)'s `Irrep`,
 `Irreps`, or `TensorProduct` behavior.
 
-The preferred generic API is available directly beside upstream e3nn:
+The public API is available directly beside upstream e3nn:
 
 ```python
 from e3nn import group
@@ -14,21 +14,14 @@ G = group.DihedralGroup(6)
 layer = group.nn.Linear(G.standard_representation(), G.regular_representation())
 ```
 
-The historical `e3nn_WE` imports remain supported for the escnn-compatible
-surface used by `mp_example.py`.
-
 All finite-group modules consume and return ordinary `torch.Tensor` objects.
 Representation metadata is stored on the modules; no tensor wrapper is part
 of the library API.
 
-`e3nn_WE` extends e3nn's representation approach to the finite planar
-groups C_n (rotations) and D_n (rotations and reflections). Its no-base-space
-API intentionally mirrors the small part of escnn used by `mp_example.py`, so
-that example only needs this import change:
-
-```python
-from e3nn_WE import gspaces, nn as enn
-```
+The extension applies e3nn's representation approach to the finite planar
+groups C_n (rotations) and D_n (rotations and reflections). `mp_example.py`
+uses `e3nn.group` directly and does not require escnn-style spaces, field
+types, or typed tensor wrappers.
 
 The implementation uses real irreducible representations, complete
 intertwiner bases for linear maps, invariant biases, and literal permutation
@@ -51,38 +44,37 @@ nonlinear equivariant models:
 
 ```python
 import torch
-from e3nn_WE import gspaces, nn
+from e3nn import group
 
-space = gspaces.no_base_space(gspaces.flipRot2dOnR2(N=6).fibergroup)
-scalars_and_vectors = nn.FieldType(
-    space,
-    8 * [space.irrep(0, 0)] + 2 * [space.irrep(1, 1)],
-)
-regular = nn.FieldType(space, 4 * [space.regular_repr])
+G = group.DihedralGroup(6)
+scalar = G.trivial_irrep
+vector = G.standard_representation()
+scalars_and_vectors = 8 * scalar + 2 * vector
+regular = 4 * G.regular_representation()
 
 model = torch.nn.Sequential(
-    nn.Linear(scalars_and_vectors, regular),
-    nn.ReLU(regular),
-    nn.Linear(regular, scalars_and_vectors),
+    group.nn.Linear(scalars_and_vectors, regular),
+    group.nn.PointwiseActivation(regular, torch.relu),
+    group.nn.Linear(regular, scalars_and_vectors),
 )
-x = torch.randn(32, scalars_and_vectors.size)
+x = torch.randn(32, scalars_and_vectors.dim)
 y = model(x)
 ```
 
 ## Harmonics and tensor products
 
 ```python
-from e3nn_WE import CircularHarmonics, RestrictedSphericalHarmonics
+from e3nn import group
 
 # Angular O(2) harmonics through the non-aliased D6 frequency limit.
-angular = CircularHarmonics(space, max_frequency=3)
+angular = group.CircularHarmonics(G, max_frequency=3)
 y_theta = angular(torch.linspace(0, 2 * torch.pi, 32))
 
 # Actual e3nn O(3) harmonics, with their representation restricted to D6.
-spatial = RestrictedSphericalHarmonics(space, degrees=[0, 1, 2, 3])
+spatial = group.RestrictedSphericalHarmonics(G, degrees=[0, 1, 2, 3])
 y_lm = spatial(torch.randn(32, 3))
 
-product = nn.FullyConnectedTensorProduct(
+product = group.nn.FullyConnectedTensorProduct(
     scalars_and_vectors,
     scalars_and_vectors,
     regular,
@@ -94,10 +86,10 @@ Restricted Wigner--Eckart products can own the spherical-harmonic evaluator
 and expose the complete sampled matrix-valued kernel basis:
 
 ```python
-restricted_tp = nn.RestrictedWignerEckartTensorProduct(
-    space.irrep(1, 1),
+restricted_tp = group.nn.RestrictedWignerEckartTensorProduct(
+    vector,
     spatial,
-    space.irrep(1, 1),
+    vector,
 )
 
 weights = radial_mlp(radial_features)
@@ -114,11 +106,11 @@ coupling space, not only paths inherited from the O(3) parent symmetry.
 For a two-dimensional C_n irrep, one representation copy may correspond to
 two real paths because its real endomorphism algebra is the complex numbers.
 
-For C_n use `gspaces.rot2dOnR2(N=n)`. Its real irreps are indexed by
-`space.irrep(k)`. D_n irreps use `space.irrep(j, k)`, matching escnn: `(0, 0)`
-is scalar and `(1, 1)` is the standard xy vector for n > 2.
+For C_n use `group.CyclicGroup(n)`. Its real irreps are indexed by
+`G.irrep(k)`. D_n irreps use `G.irrep(j, k)`: `(0, 0)` is scalar and `(1, 1)`
+is the standard xy vector for n > 2.
 
-The lower-level constructors `cyclic_group(n)` and `dihedral_group(n)` expose
+The constructors `group.CyclicGroup(n)` and `group.DihedralGroup(n)` expose
 all elements, irreps, the regular representation, group operations, character
 tensor-product decomposition, and random sampling. `Irreps` provides an
 e3nn-like multiplicity container.
