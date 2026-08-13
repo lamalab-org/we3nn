@@ -66,6 +66,10 @@ def test_explicit_full_finite_coupling_api():
     group = finite.CyclicGroup(5)
     public = finite.clebsch_gordan(group.irrep(1), group.irrep(1), group.trivial_irrep)
     full = finite.finite_group_couplings(group.irrep(1), group.irrep(1), group.trivial_irrep)
+    multiplicity = finite.tensor_product_multiplicity(
+        group.irrep(1), group.irrep(1), group.trivial_irrep
+    )
+    assert multiplicity == public.shape[0]
     assert full.shape[0] >= public.shape[0]
 
 

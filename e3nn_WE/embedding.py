@@ -80,11 +80,11 @@ class RestrictedO3Representation(Representation):
             is_orthogonal=True,
             basis_kind="restricted_o3",
         )
-        self._exact_decomposition = None
+        self._group_consistent_decomposition = None
         # e3nn 0.6's matrix-to-angle path leaves a few 1e-6 of group-law
         # residual for reflections. C_n/D_n have complete real irrep catalogs, so
-        # snap the numerical restriction to the equivalent exact finite-group
-        # representation once, at construction time.
+        # replace the noisy matrices with a numerically group-consistent
+        # finite-irrep reconstruction once, at construction time.
         if isinstance(embedding.group, (CyclicGroup, DihedralGroup)):
             decomposition = self._compute_decomposition()
             change = decomposition.change_of_basis
@@ -92,12 +92,12 @@ class RestrictedO3Representation(Representation):
             block_rep = decomposition.representation
             self._matrices = lambda element: change @ block_rep(element) @ change_inv
             self._matrix_cache.clear()
-            self._exact_decomposition = decomposition
+            self._group_consistent_decomposition = decomposition
 
     @lru_cache(maxsize=None)
     def decompose(self) -> IrrepDecomposition:
-        if self._exact_decomposition is not None:
-            return self._exact_decomposition
+        if self._group_consistent_decomposition is not None:
+            return self._group_consistent_decomposition
         return self._compute_decomposition()
 
     def _compute_decomposition(self) -> IrrepDecomposition:
@@ -149,7 +149,7 @@ def restricted_o3_couplings(
     right: o3.Irrep | str,
     output: o3.Irrep | str,
 ) -> torch.Tensor:
-    """Inherited O(3) Wigner coupling, distinct from the full finite CG space."""
+    """Inherited O(3) coupling, including parity, not the full finite CG space."""
     left, right, output = o3.Irrep(left), o3.Irrep(right), o3.Irrep(output)
     if output not in left * right:
         return torch.empty(0, output.dim, left.dim, right.dim, dtype=torch.float64)

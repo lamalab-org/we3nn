@@ -44,8 +44,17 @@ def _intertwiner_cpu(rep_in: Representation, rep_out: Representation, method: st
     if method == "reynolds":
         projected = []
         for candidate in elementary:
+            # The Reynolds action on Hom(V_in, V_out) uses the inverse. The
+            # transpose is only an optimization for orthogonal inputs.
             average = sum(
-                rep_out(element) @ candidate @ rep_in(element).T for element in rep_in.group.elements
+                rep_out(element)
+                @ candidate
+                @ (
+                    rep_in(element).T
+                    if rep_in.is_orthogonal
+                    else torch.linalg.inv(rep_in(element))
+                )
+                for element in rep_in.group.elements
             ) / rep_in.group.order()
             projected.append(average.reshape(-1))
         span = torch.stack(projected)
@@ -80,12 +89,13 @@ def _intertwiner_cpu(rep_in: Representation, rep_out: Representation, method: st
 
 
 def _representation_defect(rep: Representation) -> float:
-    """Maximum generator homomorphism/orthogonality residual in float64."""
+    """Maximum declared representation-law residual in float64."""
     identity = torch.eye(rep.size, dtype=torch.float64)
     error = 0.0
     for generator in rep.group.generators:
         matrix = rep(generator)
-        error = max(error, float((matrix.T @ matrix - identity).abs().max()))
+        if rep.is_orthogonal:
+            error = max(error, float((matrix.T @ matrix - identity).abs().max()))
         for other in rep.group.generators:
             expected = rep(rep.group.combine(generator, other))
             error = max(error, float((expected - matrix @ rep(other)).abs().max()))

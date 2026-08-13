@@ -101,10 +101,15 @@ The sampled basis has shape
 `(..., weight_numel, output_dim, input_dim)`. It contains the full finite-group
 coupling space, not only paths inherited from the O(3) parent symmetry.
 
-`clebsch_gordan(left, right, output)` returns a tensor with shape
-`(paths, output_dim, left_dim, right_dim)`. These are real intertwiner paths.
-For a two-dimensional C_n irrep, one representation copy may correspond to
-two real paths because its real endomorphism algebra is the complex numbers.
+`clebsch_gordan(left, right, output)` returns one normalized tensor for each
+representation copy, with shape
+`(multiplicity, output_dim, left_dim, right_dim)`.
+`tensor_product_multiplicity(left, right, output)` returns that copy
+multiplicity directly. `finite_group_couplings(left, right, output)` instead
+returns every independent real Hom-space path. For a two-dimensional C_n
+irrep, one representation copy corresponds to two such real paths because
+its real endomorphism algebra is the complex numbers. Neural tensor products
+use this complete real Hom space.
 
 For C_n use `group.CyclicGroup(n)`. Its real irreps are indexed by
 `G.irrep(k)`. D_n irreps use `G.irrep(j, k)`: `(0, 0)` is scalar and `(1, 1)`

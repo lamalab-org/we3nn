@@ -3,6 +3,7 @@ import torch
 import math
 
 from e3nn_WE import (
+    Representation,
     cyclic_group,
     dihedral_group,
     invariant_basis,
@@ -67,3 +68,29 @@ def test_find_global_orthogonal_representation_intertwiner():
     transform = find_representation_intertwiner(source, target)
     for element in group.elements:
         torch.testing.assert_close(target(element) @ transform, transform @ source(element))
+
+
+def test_reynolds_uses_inverse_for_nonorthogonal_representations():
+    group = cyclic_group(5)
+    orthogonal = group.irrep(1)
+    change = torch.tensor([[2.0, 0.3], [0.0, 0.5]], dtype=torch.float64)
+    change_inv = torch.linalg.inv(change)
+    nonorthogonal = Representation(
+        group,
+        "nonorthogonal-vector",
+        2,
+        lambda element: change @ orthogonal(element) @ change_inv,
+        is_orthogonal=False,
+    )
+
+    nullspace = intertwiner_basis(nonorthogonal, orthogonal, method="nullspace")
+    reynolds = intertwiner_basis(nonorthogonal, orthogonal, method="reynolds")
+    assert nullspace.shape == reynolds.shape == (2, 2, 2)
+    assert subspace_distance(nullspace, reynolds) < 2e-10
+    for element in group.elements:
+        torch.testing.assert_close(
+            orthogonal(element) @ reynolds,
+            reynolds @ nonorthogonal(element),
+            atol=2e-12,
+            rtol=2e-12,
+        )

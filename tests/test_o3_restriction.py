@@ -2,7 +2,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from e3nn_WE import dihedral_group, planar_o3, restrict_o3, restricted_o3_couplings
+from e3nn_WE import cyclic_group, dihedral_group, planar_o3, restrict_o3, restricted_o3_couplings
 
 
 def test_planar_embedding_and_l1_xy_z_decomposition():
@@ -24,6 +24,31 @@ def test_higher_l_d6_restrictions_decompose_and_reconstruct(degree):
     for element in group.elements:
         torch.testing.assert_close(
             decomposition.reconstruct(element), restricted(element), atol=1e-10, rtol=1e-10
+        )
+
+
+@pytest.mark.parametrize("n", [3, 4, 5, 6, 8])
+@pytest.mark.parametrize("degree", range(5))
+def test_cyclic_restrictions_extract_orthogonal_irrep_copies(n, degree):
+    group = cyclic_group(n)
+    restricted = restrict_o3(
+        o3.Irrep(degree, (-1) ** degree),
+        planar_o3(group),
+    )
+    decomposition = restricted.decompose()
+    change = decomposition.change_of_basis
+    torch.testing.assert_close(
+        change.T @ change,
+        torch.eye(restricted.dim, dtype=torch.float64),
+        atol=2e-12,
+        rtol=2e-12,
+    )
+    for element in group.elements:
+        torch.testing.assert_close(
+            change.T @ restricted(element) @ change,
+            decomposition.representation(element),
+            atol=2e-12,
+            rtol=2e-12,
         )
 
 
@@ -51,3 +76,11 @@ def test_o3_coupling_is_inside_full_d6_intertwiner_space_and_space_can_be_larger
     l2 = restrict_o3(o3.Irrep("2e"), embedding)
     finite = intertwiner_basis(tensor_product_representation(l3, l3), l2)
     assert finite.shape[0] > restricted_o3_couplings("3o", "3o", "2e").shape[0]
+
+
+def test_restricted_o3_couplings_apply_parity_in_addition_to_wigner_3j():
+    # The SO(3) angular triangle 1 x 1 -> 1 is allowed, but e x e -> o is not
+    # an O(3) tensor-product path.
+    assert o3.wigner_3j(1, 1, 1).numel() > 0
+    assert restricted_o3_couplings("1e", "1e", "1o").shape == (0, 3, 3, 3)
+    assert restricted_o3_couplings("1e", "1e", "1e").shape == (1, 3, 3, 3)

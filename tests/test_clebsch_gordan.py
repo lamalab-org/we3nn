@@ -3,7 +3,13 @@ import itertools
 import pytest
 import torch
 
-from e3nn_WE import clebsch_gordan, cyclic_group, dihedral_group
+from e3nn_WE import (
+    clebsch_gordan,
+    cyclic_group,
+    dihedral_group,
+    finite_group_couplings,
+    tensor_product_multiplicity,
+)
 
 
 @pytest.mark.parametrize(
@@ -23,6 +29,12 @@ def test_cg_coefficients_are_orthonormal_complete_and_equivariant(group):
         decomposition = {irrep_id: multiplicity for multiplicity, irrep_id in group.tensor_product(left, right)}
         expected_paths = decomposition.get(output.id, 0)
         assert coefficients.shape[0] == expected_paths
+        flattened = coefficients.flatten(2)
+        copy_gram = torch.einsum("poi,qji->pqoj", flattened, flattened)
+        expected_copy_gram = torch.eye(
+            coefficients.shape[0], dtype=torch.float64
+        )[:, :, None, None] * torch.eye(output.size, dtype=torch.float64)[None, None] / output.size
+        torch.testing.assert_close(copy_gram, expected_copy_gram, atol=2e-12, rtol=2e-12)
         for element in group.elements:
             transformed = torch.einsum(
                 "oa,pabc,ib,jc->poij",
@@ -42,6 +54,8 @@ def test_cyclic_complex_type_reports_one_copy_but_tensor_product_has_two_real_we
     from e3nn_WE.clebsch_gordan import full_coupling_basis
 
     assert full_coupling_basis(vector, scalar, vector).shape == (2, 2, 2, 1)
+    assert tensor_product_multiplicity(vector, scalar, vector) == 1
+    assert finite_group_couplings(vector, scalar, vector).shape[0] == 2
 
 
 def test_cg_rejects_groups_with_equal_names_but_distinct_identity():

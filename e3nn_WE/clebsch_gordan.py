@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import math
 
 import torch
 
@@ -48,9 +49,66 @@ def clebsch_gordan(
     else:
         raise ValueError("method must be 'auto', 'nullspace', or 'reynolds'")
     full = _canonical_subspace_basis(full)
+    multiplicity = _multiplicity_from_hom_dimension(full.shape[0], output)
+    return _copy_coupling_basis(full, output, multiplicity)
+
+
+def _multiplicity_from_hom_dimension(hom_dimension: int, output: Irrep) -> int:
     endomorphism_dimension = output.sum_of_squares_constituents
-    multiplicity = full.shape[0] // endomorphism_dimension
-    return full[:multiplicity]
+    multiplicity, remainder = divmod(hom_dimension, endomorphism_dimension)
+    if remainder:
+        raise RuntimeError(
+            "coupling-space dimension is not divisible by the output irrep's "
+            "endomorphism dimension"
+        )
+    return multiplicity
+
+
+def _copy_coupling_basis(
+    full: torch.Tensor,
+    output: Irrep,
+    multiplicity: int,
+) -> torch.Tensor:
+    """Extract one normalized projection for each output-irrep copy.
+
+    ``Hom_G(left x right, output)`` contains an entire orbit under
+    ``End_G(output)`` for every representation copy. Consequently, truncating
+    an arbitrary Hom basis can select several endomorphism directions for the
+    same copy. We instead work with the transposed embedding maps, remove the
+    images of copies already selected, and take an isometric polar factor.
+    """
+    if multiplicity == 0:
+        return full[:0]
+
+    domain_dimension = math.prod(full.shape[2:])
+    embeddings: list[torch.Tensor] = []
+    couplings: list[torch.Tensor] = []
+    rank_tolerance = 128.0 * torch.finfo(full.dtype).eps * max(full.shape)
+
+    for mapping in full.reshape(full.shape[0], output.size, domain_dimension):
+        embedding = mapping.T.clone()
+        if embeddings:
+            occupied = torch.cat(embeddings, dim=1)
+            embedding -= occupied @ (occupied.T @ embedding)
+
+        u, singular_values, vh = torch.linalg.svd(embedding, full_matrices=False)
+        if singular_values.numel() != output.size:
+            continue
+        tolerance = rank_tolerance * max(float(singular_values.max()), 1.0)
+        if int((singular_values > tolerance).sum()) != output.size:
+            continue
+
+        isometric_embedding = u @ vh
+        embeddings.append(isometric_embedding)
+        # Preserve the historical unit-Frobenius normalization of CG tensors.
+        coupling = isometric_embedding.T / math.sqrt(output.size)
+        couplings.append(coupling.reshape(output.size, *full.shape[2:]))
+        if len(couplings) == multiplicity:
+            break
+
+    if len(couplings) != multiplicity:
+        raise RuntimeError("failed to extract all representation-copy couplings")
+    return torch.stack(couplings).contiguous()
 
 
 def _canonical_subspace_basis(basis: torch.Tensor) -> torch.Tensor:
@@ -116,8 +174,22 @@ def _invariant_tensor_basis(
     return vh[:rank].reshape(rank, *shape).contiguous()
 
 
+def tensor_product_multiplicity(
+    left: Representation,
+    right: Representation,
+    output: Irrep,
+    *,
+    method: str = "auto",
+) -> int:
+    """Return the number of representation copies of ``output`` in ``left x right``."""
+    if not isinstance(output, Irrep):
+        raise TypeError("tensor-product multiplicity requires an irreducible output")
+    full = finite_group_couplings(left, right, output, method=method)
+    return _multiplicity_from_hom_dimension(full.shape[0], output)
+
+
 def coupling_dimension(left: Representation, right: Representation, output: Representation) -> int:
-    """Number of independent real bilinear coupling coefficients."""
+    """Backward-compatible alias for the number of CG copy representatives."""
     return int(clebsch_gordan(left, right, output).shape[0])
 
 
