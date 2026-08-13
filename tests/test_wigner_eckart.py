@@ -1,7 +1,14 @@
+import pytest
 import torch
 from e3nn import o3
 
-from e3nn_WE import gspaces, nn, planar_o3, restrict_o3
+from e3nn_WE import (
+    RestrictedSphericalHarmonics,
+    gspaces,
+    nn,
+    planar_o3,
+    restrict_o3,
+)
 
 
 def _check(module, x, filters, weights, atol=3e-5):
@@ -47,3 +54,46 @@ def test_restricted_o3_filter_uses_full_finite_group_couplings():
     # O(3) has at most one path for this irrep triple, while D6 restriction
     # generally exposes several reduced matrix elements.
     assert module.weight_numel > 1
+
+
+def test_restricted_wigner_eckart_samples_physical_kernel_basis_from_points():
+    torch.manual_seed(19)
+    group = gspaces.flipRot2dOnR2(6).fibergroup
+    space = gspaces.no_base_space(group)
+    harmonics = RestrictedSphericalHarmonics(
+        group,
+        degrees=[0, 1, 2],
+        normalization="component",
+    )
+    module = nn.RestrictedWignerEckartTensorProduct(
+        space.irrep(1, 1),
+        harmonics,
+        space.irrep(1, 1),
+    ).double()
+    points = torch.randn(7, 3, dtype=torch.float64)
+    points = points / torch.linalg.vector_norm(points, dim=-1, keepdim=True)
+    features = torch.randn(7, 2, dtype=torch.float64)
+    weights = torch.randn(7, module.weight_numel, dtype=torch.float64)
+
+    sampled = module.sample_kernel_basis(points)
+    assert sampled.shape == (7, module.weight_numel, 2, 2)
+    from_basis = torch.einsum("npoi,ni,np->no", sampled, features, weights)
+    torch.testing.assert_close(
+        from_basis,
+        module.forward_from_points(features, points, weights),
+        atol=2e-12,
+        rtol=2e-12,
+    )
+    torch.testing.assert_close(module.sample(points), sampled)
+    assert module.embedding is harmonics.embedding
+    assert module.degrees == (0, 1, 2)
+
+
+def test_restricted_wigner_eckart_rejects_unrestricted_finite_filters():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    with pytest.raises(TypeError, match=r"restricted O\(3\)"):
+        nn.RestrictedWignerEckartTensorProduct(
+            space.irrep(1, 1),
+            space.irrep(1, 1),
+            space.irrep(0, 0),
+        )

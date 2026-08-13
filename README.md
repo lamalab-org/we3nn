@@ -90,6 +90,25 @@ product = nn.FullyConnectedTensorProduct(
 z = product(x, x)
 ```
 
+Restricted Wigner--Eckart products can own the spherical-harmonic evaluator
+and expose the complete sampled matrix-valued kernel basis:
+
+```python
+restricted_tp = nn.RestrictedWignerEckartTensorProduct(
+    space.irrep(1, 1),
+    spatial,
+    space.irrep(1, 1),
+)
+
+weights = radial_mlp(radial_features)
+messages = restricted_tp.forward_from_points(node_features, edge_vectors, weights)
+kernel_basis = restricted_tp.sample_kernel_basis(edge_vectors)
+```
+
+The sampled basis has shape
+`(..., weight_numel, output_dim, input_dim)`. It contains the full finite-group
+coupling space, not only paths inherited from the O(3) parent symmetry.
+
 `clebsch_gordan(left, right, output)` returns a tensor with shape
 `(paths, output_dim, left_dim, right_dim)`. These are real intertwiner paths.
 For a two-dimensional C_n irrep, one representation copy may correspond to

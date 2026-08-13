@@ -9,7 +9,7 @@ from typing import Iterable
 import torch
 from torch import nn
 
-from ..clebsch_gordan import clebsch_gordan, full_coupling_basis
+from ..clebsch_gordan import full_coupling_basis
 from ..representations import Irrep, Representation
 from ..intertwiner import intertwiner_basis, tensor_product_representation
 from .field_type import FieldType, as_field_type

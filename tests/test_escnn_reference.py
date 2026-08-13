@@ -14,6 +14,7 @@ except ImportError as error:
 from e3nn_WE import cyclic_group, dihedral_group, gspaces, nn
 from e3nn_WE import clebsch_gordan, subspace_diagnostics
 from e3nn_WE import (
+    RestrictedSphericalHarmonics,
     intertwiner_basis,
     tensor_product_representation,
     direct_sum,
@@ -146,47 +147,56 @@ def test_restricted_o3_representations_match_escnn_up_to_one_basis(degree):
         )
 
 
-def test_restricted_wigner_eckart_coupling_space_matches_escnn():
+def test_restricted_wigner_eckart_sampled_kernel_space_matches_escnn():
     from escnn import group as escnn_group
+    from escnn.kernels import kernels_O3_subgroup_act_R3
 
+    maximum_frequency = 2
     ours_group = dihedral_group(6)
-    embedding = planar_o3(ours_group)
-    parent = escnn_group.o3_group()
+    ours_space = gspaces.no_base_space(ours_group)
+    harmonics = RestrictedSphericalHarmonics(
+        ours_group,
+        degrees=range(maximum_frequency + 1),
+        normalization="component",
+    )
+    ours = nn.RestrictedWignerEckartTensorProduct(
+        ours_space.irrep(1, 1),
+        harmonics,
+        ours_space.irrep(1, 1),
+    ).double()
+
+    parent = escnn_group.o3_group(maximum_frequency)
     reference_group, _, _ = parent.subgroup(("cone", 6))
-    degrees = (1, 2, 1)
-    ours_reps = [restrict_o3(o3.Irrep(l, (-1) ** l), embedding) for l in degrees]
-    reference_reps = [parent.irrep(l % 2, l).restrict(("cone", 6)) for l in degrees]
-    wrapped_reps = [
-        ours_group.representation(
-            {
-                element: reference(reference_element)
-                for element, reference_element in zip(ours_group.elements, reference_group.elements)
-            },
-            name=f"escnn-restricted-l{degree}",
-        )
-        for degree, reference in zip(degrees, reference_reps)
-    ]
-    transforms = [
-        find_representation_intertwiner(wrapped, ours, atol=2e-7)
-        for wrapped, ours in zip(wrapped_reps, ours_reps)
-    ]
-    ours_basis = intertwiner_basis(
-        tensor_product_representation(ours_reps[0], ours_reps[1]),
-        ours_reps[2],
+    reference_irrep = reference_group.irrep(1, 1)
+    reference = kernels_O3_subgroup_act_R3(
+        reference_irrep,
+        reference_irrep,
+        ("cone", 6),
+        radii=[1.0],
+        sigma=[0.6],
+        maximum_frequency=maximum_frequency,
     )
-    reference_basis = torch.from_numpy(
-        escnn_group.homomorphism_space(reference_reps[0].tensor(reference_reps[1]), reference_reps[2])
-    ).to(torch.float64)
-    input_transform = torch.kron(transforms[0], transforms[1])
-    transported = torch.einsum(
-        "oa,pab,ib->poi",
-        transforms[2],
-        reference_basis,
-        input_transform,
+
+    points = torch.tensor(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 2.0, 3.0],
+            [-2.0, 1.0, 0.5],
+            [0.2, -0.7, 1.3],
+            [1.0, 1.0, -1.0],
+        ],
+        dtype=torch.float64,
     )
-    diagnostics = subspace_diagnostics(ours_basis, transported)
-    assert ours_basis.shape == transported.shape
-    assert diagnostics["projector_error"] < 3e-7, diagnostics
+    points = points / torch.linalg.vector_norm(points, dim=-1, keepdim=True)
+    ours_sampled = ours.sample_kernel_basis(points).permute(1, 0, 2, 3)
+    reference_sampled = reference.sample(points.float()).double().permute(1, 0, 2, 3)
+
+    assert ours_sampled.shape == reference_sampled.shape
+    diagnostics = subspace_diagnostics(ours_sampled, reference_sampled)
+    assert diagnostics["projector_error"] < 5e-6, diagnostics
+    assert diagnostics["largest_principal_angle"] < 5e-6, diagnostics
 
 
 @pytest.mark.parametrize("kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)])

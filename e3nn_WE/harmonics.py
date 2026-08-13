@@ -11,7 +11,6 @@ from e3nn import o3
 from .groups import CyclicGroup, DihedralGroup, FiniteGroup
 from .gspaces import GSpace, no_base_space
 from .nn.field_type import FieldType
-from .representations import Representation
 from .embedding import O3Embedding, planar_o3, restrict_o3
 
 

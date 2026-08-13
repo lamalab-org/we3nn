@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property, lru_cache
 import math
-from typing import Iterable, Iterator, Sequence
+from typing import Iterator, Sequence
 from abc import ABC, abstractmethod
 
 import torch

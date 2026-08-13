@@ -23,6 +23,9 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -e '.[test,reference]'
+      # Do not let a broken optional escnn installation turn the entire
+      # interoperability tier into a successful module-level skip.
+      - run: python -c "from escnn import gspaces, kernels, nn"
       - run: pytest -m escnn
 
   slow-mathematics:

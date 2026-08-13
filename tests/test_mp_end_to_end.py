@@ -4,6 +4,13 @@ from mp_example import EquivariantMPLayer
 from e3nn_WE.utils import scatter
 
 
+def test_message_layer_uses_the_requested_regular_activation():
+    activation = torch.nn.SiLU()
+    layer = EquivariantMPLayer(3, 4, activation)
+    for index in (1, 3, 5):
+        assert layer.message_mlp_en[index].function is activation
+
+
 def test_actual_message_passing_layer_forward_backward_and_d6_equivariance():
     torch.manual_seed(7)
     nodes, in_channels, hidden_channels = 9, 5, 8
