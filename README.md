@@ -14,14 +14,17 @@ G = group.DihedralGroup(6)
 layer = group.nn.WELinear(G.standard_representation(), G.regular_representation())
 ```
 
-All finite-group modules consume and return ordinary `torch.Tensor` objects.
-Representation metadata is stored on the modules; no tensor wrapper is part
-of the library API.
+All finite-group modules continue to accept ordinary `torch.Tensor` objects.
+For runtime representation checks, tensors can optionally be wrapped with
+`RepresentationTensor` or `FieldType.wrap()`. Tensor products warn when raw
+inputs have no metadata and raise an error when wrapped metadata disagrees
+with their declared input representations. Typed inputs propagate typed
+outputs through `WELinear`, `PointActiv`, and tensor products.
 
 The extension applies e3nn's representation approach to the finite planar
 groups C_n (rotations) and D_n (rotations and reflections). `mp_example.py`
 uses `we3nn.group` directly and does not require escnn-style spaces, field
-types, or typed tensor wrappers.
+types. Its raw-tensor calls intentionally use the warning-compatible API.
 
 The implementation uses real irreducible representations, complete
 intertwiner bases for linear maps, invariant biases, and literal permutation
@@ -81,6 +84,23 @@ product = group.nn.FullyConnectedTensorProduct(
 )
 z = product(x, x)
 ```
+
+To enable representation checking and metadata propagation:
+
+```python
+from we3nn import RepresentationTensor
+
+typed_x = RepresentationTensor(x, scalars_and_vectors)
+# Equivalently: typed_x = group.nn.FieldType(...).wrap(x)
+typed_z = product(typed_x, typed_x)
+assert typed_z.field_type == product.out_type
+z = typed_z.tensor
+```
+
+Passing raw tensors to a tensor product returns a raw tensor and emits
+`MissingRepresentationMetadataWarning`. If only some inputs are wrapped, the
+operation warns and returns a raw tensor. When every representation-carrying
+input is wrapped, the result is a `RepresentationTensor`.
 
 Restricted Wigner--Eckart products can own the spherical-harmonic evaluator
 and expose the complete sampled matrix-valued kernel basis:

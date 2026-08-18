@@ -6,16 +6,22 @@ from .nonlinearities import ELU, ReLU, PointActiv, PointwiseNonLinearity
 from .sequential import SequentialModule
 from .tensor_product import FullTensorProduct, FullyConnectedTensorProduct, TensorProduct, TensorProductInstruction
 from .wigner_eckart import RestrictedWETensorProduct, WETensorProduct
+from .representation_tensor import (
+    MissingRepresentationMetadataWarning,
+    RepresentationTensor,
+)
 
 __all__ = [
     "ELU",
     "FieldType",
     "FullyConnectedTensorProduct",
     "FullTensorProduct",
+    "MissingRepresentationMetadataWarning",
     "WELinear",
     "PointwiseNonLinearity",
     "PointActiv",
     "ReLU",
+    "RepresentationTensor",
     "SequentialModule",
     "TensorProduct",
     "TensorProductInstruction",

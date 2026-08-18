@@ -8,6 +8,11 @@ from torch.nn import functional as F
 
 from .field_type import FieldType, as_field_type
 from ..representations import Representation
+from .representation_tensor import (
+    RepresentationTensor,
+    unpack_representation_tensor,
+    wrap_if_typed,
+)
 
 
 class PointwiseNonLinearity(nn.Module):
@@ -26,12 +31,14 @@ class PointwiseNonLinearity(nn.Module):
         self.out_type = in_type
         self.function = function
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if not isinstance(input, torch.Tensor):
-            raise TypeError("pointwise activations expect an ordinary torch.Tensor")
-        if input.shape[-1] != self.in_type.size:
-            raise ValueError(f"expected last dimension {self.in_type.size}, got {input.shape[-1]}")
-        return self.function(input)
+    def forward(
+        self,
+        input: torch.Tensor | RepresentationTensor,
+    ) -> torch.Tensor | RepresentationTensor:
+        tensor, typed = unpack_representation_tensor(input, self.in_type, "input")
+        if tensor.shape[-1] != self.in_type.size:
+            raise ValueError(f"expected last dimension {self.in_type.size}, got {tensor.shape[-1]}")
+        return wrap_if_typed(self.function(tensor), self.out_type, typed)
 
     def evaluate_output_shape(self, input_shape: tuple[int, ...]) -> tuple[int, ...]:
         return input_shape

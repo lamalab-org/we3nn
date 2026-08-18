@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from .representation_tensor import RepresentationTensor
 
 
 class SequentialModule(nn.Sequential):
@@ -21,8 +22,12 @@ class SequentialModule(nn.Sequential):
         self.in_type = modules[0].in_type
         self.out_type = modules[-1].out_type
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if not isinstance(input, torch.Tensor) or input.shape[-1] != self.in_type.size:
+    def forward(
+        self,
+        input: torch.Tensor | RepresentationTensor,
+    ) -> torch.Tensor | RepresentationTensor:
+        shape = input.shape if isinstance(input, (torch.Tensor, RepresentationTensor)) else None
+        if shape is None or shape[-1] != self.in_type.size:
             raise TypeError(f"expected a tensor with final dimension {self.in_type.size}")
         return super().forward(input)
 

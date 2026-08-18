@@ -29,7 +29,14 @@ from .embedding import (
     restricted_o3_couplings,
 )
 from .representations import DirectSum, DirectSumRepresentation, Irrep, Irreps, RepBlock, Representation, direct_sum
-from .nn import PointActiv, RestrictedWETensorProduct, WELinear, WETensorProduct
+from .nn import (
+    MissingRepresentationMetadataWarning,
+    PointActiv,
+    RepresentationTensor,
+    RestrictedWETensorProduct,
+    WELinear,
+    WETensorProduct,
+)
 
 __all__ = [
     "CyclicGroup",
@@ -43,10 +50,12 @@ __all__ = [
     "Irrep",
     "Irreps",
     "MatrixFiniteGroup",
+    "MissingRepresentationMetadataWarning",
     "O3Embedding",
     "PointActiv",
     "RepBlock",
     "Representation",
+    "RepresentationTensor",
     "RestrictedSphericalHarmonics",
     "RestrictedWETensorProduct",
     "RestrictedO3Representation",

@@ -10,6 +10,10 @@ from ..harmonics import RestrictedSphericalHarmonics
 from ..representations import Representation
 from .field_type import FieldType, as_field_type
 from .tensor_product import TensorProduct
+from .representation_tensor import (
+    RepresentationTensor,
+    unpack_tensor_product_inputs,
+)
 
 
 class WETensorProduct(nn.Module):
@@ -40,13 +44,16 @@ class WETensorProduct(nn.Module):
 
     def forward(
         self,
-        features: torch.Tensor,
-        filter_features: torch.Tensor,
+        features: torch.Tensor | RepresentationTensor,
+        filter_features: torch.Tensor | RepresentationTensor,
         reduced_weights: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | RepresentationTensor:
         return self.tensor_product(features, filter_features, reduced_weights)
 
-    def sample_kernel_basis(self, filter_features: torch.Tensor) -> torch.Tensor:
+    def sample_kernel_basis(
+        self,
+        filter_features: torch.Tensor | RepresentationTensor,
+    ) -> torch.Tensor:
         """Expand filter features into the physical kernel basis.
 
         The result has shape ``(..., weight_numel, out_dim, in_dim)``. Its
@@ -55,8 +62,10 @@ class WETensorProduct(nn.Module):
         This operation is intended for kernel inspection, oracle comparison,
         and basis precomputation; the regular forward path remains fused.
         """
-        if not isinstance(filter_features, torch.Tensor):
-            raise TypeError("filter features must be an ordinary torch.Tensor")
+        (filter_features,), _ = unpack_tensor_product_inputs(
+            (("filter_features", filter_features, self.rep_filter),),
+            f"{type(self).__name__}.sample_kernel_basis",
+        )
         if filter_features.shape[-1] != self.rep_filter.size:
             raise ValueError(
                 f"expected filter dimension {self.rep_filter.size}, got {filter_features.shape[-1]}"
@@ -187,16 +196,18 @@ class RestrictedWETensorProduct(WETensorProduct):
 
     def forward_from_points(
         self,
-        features: torch.Tensor,
+        features: torch.Tensor | RepresentationTensor,
         points: torch.Tensor,
         reduced_weights: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | RepresentationTensor:
         """Evaluate restricted harmonics and apply the tensor product."""
-        return self(features, self.evaluate_filter(points), reduced_weights)
+        filters = RepresentationTensor(self.evaluate_filter(points), self.rep_filter)
+        return self(features, filters, reduced_weights)
 
     def sample_kernel_basis(self, points: torch.Tensor) -> torch.Tensor:
         """Sample all restricted finite-group kernel paths at 3D points."""
-        return super().sample_kernel_basis(self.evaluate_filter(points))
+        filters = RepresentationTensor(self.evaluate_filter(points), self.rep_filter)
+        return super().sample_kernel_basis(filters)
 
     def sample(self, points: torch.Tensor) -> torch.Tensor:
         """Alias matching escnn's analytical kernel-basis interface."""

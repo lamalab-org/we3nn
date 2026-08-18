@@ -13,6 +13,11 @@ from ..clebsch_gordan import full_coupling_basis
 from ..representations import Irrep, Representation
 from ..intertwiner import intertwiner_basis, tensor_product_representation
 from .field_type import FieldType, as_field_type
+from .representation_tensor import (
+    RepresentationTensor,
+    unpack_tensor_product_inputs,
+    wrap_if_typed,
+)
 
 
 @dataclass(frozen=True)
@@ -310,12 +315,17 @@ class TensorProduct(nn.Module):
 
     def forward(
         self,
-        input1: torch.Tensor,
-        input2: torch.Tensor,
+        input1: torch.Tensor | RepresentationTensor,
+        input2: torch.Tensor | RepresentationTensor,
         weight: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if not isinstance(input1, torch.Tensor) or not isinstance(input2, torch.Tensor):
-            raise TypeError("TensorProduct expects ordinary torch.Tensor inputs")
+    ) -> torch.Tensor | RepresentationTensor:
+        (input1, input2), typed = unpack_tensor_product_inputs(
+            (
+                ("input1", input1, self.in1_type),
+                ("input2", input2, self.in2_type),
+            ),
+            type(self).__name__,
+        )
         if input1.shape[-1] != self.in1_type.size or input2.shape[-1] != self.in2_type.size:
             raise ValueError("tensor-product input feature dimensions do not match the representations")
         if input1.shape[:-1] != input2.shape[:-1]:
@@ -344,7 +354,7 @@ class TensorProduct(nn.Module):
             value = path(left, right, external)
             start, end = self.out_type.fields_start[instruction.i_out], self.out_type.fields_end[instruction.i_out]
             output[..., start:end] = output[..., start:end] + value
-        return output
+        return wrap_if_typed(output, self.out_type, typed)
 
     def evaluate_output_shape(self, input1_shape: tuple[int, ...], input2_shape: tuple[int, ...]) -> tuple[int, ...]:
         if input1_shape[:-1] != input2_shape[:-1]:
@@ -365,14 +375,22 @@ class TensorProduct(nn.Module):
         if not self.internal_weights:
             weight_shape = (self.weight_numel,) if self.shared_weights else (*shape, self.weight_numel)
             external = torch.randn(*weight_shape, device=reference.device, dtype=reference.dtype)
-        output = self(left, right, external)
+        output = self(
+            RepresentationTensor(left, self.in1_type),
+            RepresentationTensor(right, self.in2_type),
+            external,
+        ).tensor
         errors = []
         for element in self.in1_type.fibergroup.elements:
             actual = self(
-                self.in1_type.transform_fibers(left, element),
-                self.in2_type.transform_fibers(right, element),
+                RepresentationTensor(
+                    self.in1_type.transform_fibers(left, element), self.in1_type
+                ),
+                RepresentationTensor(
+                    self.in2_type.transform_fibers(right, element), self.in2_type
+                ),
                 external,
-            )
+            ).tensor
             expected = self.out_type.transform_fibers(output, element)
             error = float((actual - expected).abs().max())
             if not torch.allclose(actual, expected, atol=atol, rtol=rtol):
@@ -403,14 +421,24 @@ class FullTensorProduct(nn.Module):
             [tensor_product_representation(in1_type.representation, in2_type.representation)],
         )
 
-    def forward(self, input1: torch.Tensor, input2: torch.Tensor) -> torch.Tensor:
-        if not isinstance(input1, torch.Tensor) or not isinstance(input2, torch.Tensor):
-            raise TypeError("FullTensorProduct expects ordinary torch.Tensor inputs")
+    def forward(
+        self,
+        input1: torch.Tensor | RepresentationTensor,
+        input2: torch.Tensor | RepresentationTensor,
+    ) -> torch.Tensor | RepresentationTensor:
+        (input1, input2), typed = unpack_tensor_product_inputs(
+            (
+                ("input1", input1, self.in1_type),
+                ("input2", input2, self.in2_type),
+            ),
+            type(self).__name__,
+        )
         if input1.shape[-1] != self.in1_type.size or input2.shape[-1] != self.in2_type.size:
             raise ValueError("FullTensorProduct feature dimensions do not match")
         if input1.shape[:-1] != input2.shape[:-1]:
             raise ValueError("input leading dimensions must match")
-        return torch.einsum("...i,...j->...ij", input1, input2).flatten(-2)
+        output = torch.einsum("...i,...j->...ij", input1, input2).flatten(-2)
+        return wrap_if_typed(output, self.out_type, typed)
 
 
 def _coupling_dimension(left: Representation, right: Representation, output: Representation) -> int:

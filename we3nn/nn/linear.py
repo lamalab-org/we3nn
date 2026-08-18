@@ -13,6 +13,11 @@ from torch.nn import functional as F
 from ..representations import Representation
 from ..intertwiner import intertwiner_basis as generic_intertwiner_basis
 from .field_type import FieldType, as_field_type
+from .representation_tensor import (
+    RepresentationTensor,
+    unpack_representation_tensor,
+    wrap_if_typed,
+)
 
 
 @lru_cache(maxsize=None)
@@ -349,11 +354,13 @@ class WELinear(nn.Module):
                     bias.write_into(bias_tensor)
         return weight, bias_tensor
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if not isinstance(input, torch.Tensor):
-            raise TypeError("WELinear expects an ordinary torch.Tensor")
-        if input.shape[-1] != self.in_type.size:
-            raise ValueError(f"expected last dimension {self.in_type.size}, got {input.shape[-1]}")
+    def forward(
+        self,
+        input: torch.Tensor | RepresentationTensor,
+    ) -> torch.Tensor | RepresentationTensor:
+        tensor, typed = unpack_representation_tensor(input, self.in_type, "input")
+        if tensor.shape[-1] != self.in_type.size:
+            raise ValueError(f"expected last dimension {self.in_type.size}, got {tensor.shape[-1]}")
         if torch.is_grad_enabled():
             weight, bias = self.expand_parameters()
         else:
@@ -367,7 +374,8 @@ class WELinear(nn.Module):
                 self._inference_versions = versions
             weight = self._inference_weight
             bias = self._inference_bias if self.bias else None
-        return F.linear(input, weight, bias)
+        output = F.linear(tensor, weight, bias)
+        return wrap_if_typed(output, self.out_type, typed)
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)

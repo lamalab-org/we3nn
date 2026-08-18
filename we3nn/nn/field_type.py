@@ -55,6 +55,12 @@ class FieldType(Sequence[Representation]):
         matrix = self.representation(element).to(device=tensor.device, dtype=tensor.dtype)
         return tensor @ matrix.T
 
+    def wrap(self, tensor: torch.Tensor):
+        """Attach this field type to ``tensor`` for runtime representation checks."""
+        from .representation_tensor import RepresentationTensor
+
+        return RepresentationTensor(tensor, self)
+
     def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, FieldType)
