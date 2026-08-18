@@ -124,19 +124,19 @@ def test_restricted_spherical_harmonics_finite_irrep_basis():
         torch.testing.assert_close(actual, expected, atol=8e-6, rtol=8e-6)
 
 
-def test_restricted_spherical_harmonics_minimal_c6_irrep_basis():
+def test_restricted_spherical_harmonics_c6_irrep_basis_preserves_multiplicities():
     group = cyclic_group(6)
     module = RestrictedSphericalHarmonics(
         group,
         degrees=3,
-        basis="minimal_finite_irreps",
+        basis="finite_irreps",
     )
     vectors = torch.randn(13, 3, dtype=torch.float64)
     output = module(vectors)
 
-    assert output.shape == (13, 6)
-    assert module.change_to_output_basis.shape == (6, 7)
-    assert [rep.id for rep in module.out_type] == [(0,), (1,), (2,), (3,)]
+    assert output.shape == (13, 7)
+    assert module.change_to_output_basis.shape == (7, 7)
+    assert [rep.id for rep in module.out_type] == [(0,), (1,), (2,), (3,), (3,)]
 
     embedding = planar_o3(group)
     for element in group.elements:
@@ -145,12 +145,10 @@ def test_restricted_spherical_harmonics_minimal_c6_irrep_basis():
         torch.testing.assert_close(actual, expected, atol=8e-6, rtol=8e-6)
 
 
-@pytest.mark.parametrize("group", [cyclic_group(5), cyclic_group(6), dihedral_group(6)])
-def test_minimal_finite_irrep_basis_has_no_repeated_irreps(group):
-    module = RestrictedSphericalHarmonics(
-        group,
-        degrees=range(full_harmonic_bandlimit(group) + 1),
-        basis="minimal_finite_irreps",
-    )
-    ids = [rep.id for rep in module.out_type]
-    assert len(ids) == len(set(ids))
+def test_unknown_harmonic_basis_is_rejected():
+    with pytest.raises(ValueError, match="basis must be"):
+        RestrictedSphericalHarmonics(
+            cyclic_group(6),
+            degrees=3,
+            basis="unknown",
+        )
