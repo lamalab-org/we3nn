@@ -7,10 +7,14 @@ The timing deliberately excludes construction and uses one CPU thread.
 from __future__ import annotations
 
 import statistics
+import sys
 import time
 import tracemalloc
+from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from we3nn import group
 

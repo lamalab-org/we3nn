@@ -22,6 +22,19 @@ from .representation_tensor import (
 
 @dataclass(frozen=True)
 class TensorProductInstruction:
+    """Select one equivariant field triple in :class:`TensorProduct`.
+
+    ``i_in1``, ``i_in2``, and ``i_out`` index fields in the two input
+    ``FieldType`` objects and the output ``FieldType``. ``coupling`` can select
+    one real Hom-space direction; ``None`` keeps every direction. Only the
+    e3nn-style ``"uvw"`` connection mode is currently defined. ``has_weight``
+    controls whether the path consumes a learned or external reduced weight,
+    and ``path_weight`` applies an additional fixed scalar normalization.
+
+    ``path_shape`` is populated by the constructed module and reports the
+    reduced-weight shape required by this instruction.
+    """
+
     i_in1: int
     i_in2: int
     i_out: int
@@ -214,7 +227,20 @@ class _TensorProductPath(nn.Module):
 
 
 class TensorProduct(nn.Module):
-    """A complete equivariant bilinear map on ordinary PyTorch tensors.
+    r"""General learnable finite-group equivariant tensor product.
+
+    For representations :math:`V_1`, :math:`V_2`, and :math:`V_o`, each path
+    uses a basis tensor
+
+    .. math::
+
+        C_p \in \operatorname{Hom}_G(V_1 \otimes V_2, V_o)
+
+    and evaluates
+
+    .. math::
+
+        z_o = \sum_p w_p (C_p)_{oij} x_i y_j.
 
     By default, every compatible triple of input/output fields is included.
     ``instructions`` may instead contain ``(i_in1, i_in2, i_out)`` triples or
@@ -225,6 +251,26 @@ class TensorProduct(nn.Module):
     :meth:`forward`. Shared weights have shape ``(weight_numel,)``; with
     ``shared_weights=False`` they have shape ``(..., weight_numel)`` matching
     the inputs' leading dimensions.
+
+    Args:
+        in1_type: Representation carried by the first input's final axis.
+        in2_type: Representation carried by the second input's final axis.
+        out_type: Requested direct sum of output representations.
+        instructions: Optional subset and configuration of coupling paths.
+        internal_weights: Store reduced weights as module parameters.
+        shared_weights: Share one external weight vector over leading axes.
+
+    Input safety:
+        Raw ``torch.Tensor`` inputs remain supported but emit
+        :class:`MissingRepresentationMetadataWarning`. Wrap both inputs with
+        :class:`RepresentationTensor` to validate their representations and
+        receive a typed output. Incorrect metadata raises ``TypeError`` even
+        when tensor dimensions happen to match.
+
+    Choose this class when path selection or internal/external weight control
+    is required. Use :class:`FullyConnectedTensorProduct` to emphasize the
+    all-path default or :class:`FullTensorProduct` for an unprojected Kronecker
+    product.
     """
 
     def __init__(
@@ -400,11 +446,40 @@ class TensorProduct(nn.Module):
 
 
 class FullyConnectedTensorProduct(TensorProduct):
-    """Alias emphasizing that all compatible field triples are connected."""
+    """Connect every compatible input-field pair to every requested output.
+
+    This is the fully connected specialization of :class:`TensorProduct`.
+    Its constructor and forward arguments are identical; omitting
+    ``instructions`` enumerates every nonzero real equivariant Hom-space path.
+    Reduced weights can be internal, shared external, or per-sample external.
+
+    Raw inputs emit :class:`MissingRepresentationMetadataWarning`. Two
+    correctly typed :class:`RepresentationTensor` inputs produce a typed
+    output; mismatched metadata raises ``TypeError``.
+    """
 
 
 class FullTensorProduct(nn.Module):
-    """Unweighted direct tensor product in the product coordinate basis."""
+    r"""Return the unweighted direct product in the product coordinate basis.
+
+    This module computes
+
+    .. math::
+
+        (x \otimes y)_{ij} = x_i y_j
+
+    and flattens ``(i, j)`` into the final axis. It performs no irrep
+    decomposition, no projection onto a requested output, and has no learned
+    parameters. ``out_type`` is the tensor-product representation
+    :math:`\rho_1(g) \otimes \rho_2(g)` in that same flattened basis.
+
+    Use this class when downstream code needs the complete product feature
+    space. Use :class:`TensorProduct` when a decomposed/output-selected and
+    weighted equivariant map is desired.
+
+    Raw inputs emit :class:`MissingRepresentationMetadataWarning`; two typed
+    inputs produce a typed product and representation mismatches are errors.
+    """
 
     def __init__(self, in1_type: FieldType | Representation, in2_type: FieldType | Representation):
         super().__init__()

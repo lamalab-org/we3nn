@@ -17,7 +17,33 @@ from .representation_tensor import (
 
 
 class WETensorProduct(nn.Module):
-    """Separate fixed finite-group coupling tensors from reduced weights."""
+    r"""Wigner--Eckart tensor product with externally supplied reduced weights.
+
+    ``features`` transform under ``rep_in`` and ``filter_features`` under
+    ``rep_filter``. The module constructs the complete finite-group coupling
+    basis
+
+    .. math::
+
+        C_p \in \operatorname{Hom}_G
+        (V_{\mathrm{in}} \otimes V_{\mathrm{filter}}, V_{\mathrm{out}})
+
+    once, then evaluates it using externally supplied reduced weights. With
+    ``shared_weights=False`` (the default), ``reduced_weights`` has shape
+    ``(..., weight_numel)`` matching the inputs' leading axes. Shared weights
+    have shape ``(weight_numel,)``.
+
+    This separation is useful for steerable kernels: angular/filter features
+    determine the fixed equivariant basis while a radial network predicts the
+    reduced coefficients. :meth:`sample_kernel_basis` expands filter samples
+    into matrices with shape
+    ``(..., weight_numel, output_dim, input_dim)``.
+
+    Raw feature/filter tensors emit
+    :class:`MissingRepresentationMetadataWarning`. If both are
+    :class:`RepresentationTensor` objects, metadata is validated and the
+    output is typed. Reduced weights are invariant scalars and need no wrapper.
+    """
 
     def __init__(self, rep_in: FieldType | Representation, rep_filter: FieldType | Representation, rep_out: FieldType | Representation, *, shared_weights: bool = False):
         super().__init__()
@@ -123,7 +149,7 @@ class WETensorProduct(nn.Module):
 
 
 class RestrictedWETensorProduct(WETensorProduct):
-    """Wigner--Eckart product using O(3) harmonics restricted to a subgroup.
+    r"""Wigner--Eckart product using O(3) harmonics restricted to C_n or D_n.
 
     Pass a :class:`RestrictedSphericalHarmonics` module as ``rep_filter`` to
     couple directly from points with :meth:`forward_from_points` and to sample
@@ -134,6 +160,24 @@ class RestrictedWETensorProduct(WETensorProduct):
     Couplings always span the full finite-group Hom space. O(3) Wigner
     coefficients therefore describe an inherited subspace but never truncate
     subgroup-only paths.
+
+    :meth:`forward_from_points` evaluates the owned e3nn spherical harmonics
+    at 3D ``points`` and combines them with input features and reduced radial
+    weights. :meth:`sample_kernel_basis` evaluates every resulting
+    matrix-valued kernel path at supplied points. The harmonic filter created
+    internally carries known metadata, so only an unwrapped feature input can
+    trigger :class:`MissingRepresentationMetadataWarning`.
+
+    Args:
+        rep_in: Input feature representation.
+        rep_filter: Restricted harmonic evaluator or its output type.
+        rep_out: Desired kernel output representation.
+        harmonics: Optional evaluator when ``rep_filter`` is supplied as a
+            representation rather than as a module.
+        shared_weights: Share one reduced-weight vector over leading axes.
+
+    The output is a :class:`RepresentationTensor` when the feature input is
+    typed; representation mismatches are rejected before harmonic contraction.
     """
 
     def __init__(

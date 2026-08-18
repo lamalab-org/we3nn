@@ -43,6 +43,20 @@ nonlinear equivariant models:
 - ordinary 3D spherical harmonics computed by `e3nn.o3.spherical_harmonics`
   and restricted to the C_n/D_n action which fixes the z axis.
 
+### Choosing a tensor product
+
+| Module | Purpose | Weights | Output basis |
+| --- | --- | --- | --- |
+| `TensorProduct` | Configurable equivariant field couplings | Internal or external | Requested representations |
+| `FullyConnectedTensorProduct` | Every compatible coupling path | Internal or external | Requested representations |
+| `FullTensorProduct` | Complete unprojected Kronecker product | None | Product-coordinate basis |
+| `WETensorProduct` | Fixed coupling tensors plus reduced coefficients | External | Requested representations |
+| `RestrictedWETensorProduct` | Wigner--Eckart kernels from restricted e3nn spherical harmonics | External/radial | Requested representations |
+
+All five validate `RepresentationTensor` metadata. Raw feature tensors emit
+`MissingRepresentationMetadataWarning` and continue through the compatible
+raw-tensor path.
+
 ## Example
 
 ```python
@@ -65,6 +79,18 @@ y = model(x)
 ```
 
 ## Harmonics and tensor products
+
+Omitting the band selects the full finite-group default
+
+$$
+L_{\mathrm{full}}(C_n)=\lfloor n/2\rfloor,
+\qquad
+L_{\mathrm{full}}(D_n)=n.
+$$
+
+The selected circular frequencies and spherical degrees are
+`0, ..., L_full`. Pass `max_frequency=` or `degrees=` to request a custom
+band.
 
 ```python
 from we3nn import group
