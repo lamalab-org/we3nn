@@ -69,13 +69,17 @@ y = model(x)
 ```python
 from we3nn import group
 
-# Angular O(2) harmonics through the non-aliased D6 frequency limit.
-angular = group.CircularHarmonics(G, max_frequency=3)
+# Defaults to the full D6 band, frequencies 0 through 6.
+angular = group.CircularHarmonics(G)
 y_theta = angular(torch.linspace(0, 2 * torch.pi, 32))
 
 # Actual e3nn O(3) harmonics, with their representation restricted to D6.
-spatial = group.RestrictedSphericalHarmonics(G, degrees=[0, 1, 2, 3])
+spatial = group.RestrictedSphericalHarmonics(G)
 y_lm = spatial(torch.randn(32, 3))
+
+# Custom smaller bands remain available.
+angular_small = group.CircularHarmonics(G, max_frequency=3)
+spatial_small = group.RestrictedSphericalHarmonics(G, degrees=[0, 1, 2, 3])
 
 product = group.nn.FullyConnectedTensorProduct(
     scalars_and_vectors,

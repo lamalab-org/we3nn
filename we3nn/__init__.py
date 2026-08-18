@@ -8,7 +8,13 @@ from .clebsch_gordan import (
     tensor_product_multiplicity,
 )
 from .groups import CyclicGroup, DihedralGroup, FiniteGroup, Group, GroupElement, cyclic_group, dihedral_group
-from .harmonics import CircularHarmonics, RestrictedSphericalHarmonics, circular_harmonics, spherical_harmonics
+from .harmonics import (
+    CircularHarmonics,
+    RestrictedSphericalHarmonics,
+    circular_harmonics,
+    full_harmonic_bandlimit,
+    spherical_harmonics,
+)
 from .matrix_group import MatrixFiniteGroup
 from .intertwiner import (
     TensorProductRepresentation,
@@ -68,6 +74,7 @@ __all__ = [
     "clebsch_gordan",
     "coupling_dimension",
     "finite_group_couplings",
+    "full_harmonic_bandlimit",
     "tensor_product_multiplicity",
     "dihedral_group",
     "direct_sum",

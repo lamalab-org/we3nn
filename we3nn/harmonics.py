@@ -14,14 +14,22 @@ from .nn.field_type import FieldType
 from .embedding import O3Embedding, planar_o3, restrict_o3
 
 
+def full_harmonic_bandlimit(group: FiniteGroup) -> int:
+    """Default maximum harmonic degree resolving the full finite-group action."""
+    if isinstance(group, CyclicGroup):
+        return group.n // 2
+    if isinstance(group, DihedralGroup):
+        return group.n
+    raise TypeError("full harmonic bandlimits are defined only for C_n and D_n")
+
+
 class CircularHarmonics(nn.Module):
     """Real angular harmonics transforming in C_n or D_n irreps.
 
     Frequencies from zero through ``max_frequency`` are returned in ascending
-    order. To avoid aliased representations, the maximum is limited to
-    ``floor(n / 2)``. For even C_n, cosine and sine at the Nyquist frequency
-    are two copies of the same one-dimensional rotation irrep. For even D_n,
-    they are the reflection-even and reflection-odd Nyquist irreps.
+    order. The default is ``floor(n / 2)`` for C_n and ``n`` for D_n. D_n
+    frequencies above Nyquist are retained as distinct harmonic functions and
+    carry the metadata of their equivalent real irreps.
 
     ``normalization`` follows e3nn terminology:
 
@@ -41,7 +49,7 @@ class CircularHarmonics(nn.Module):
         self.group = self.space.fibergroup
         if not isinstance(self.group, (CyclicGroup, DihedralGroup)):
             raise TypeError("circular harmonics require a cyclic or dihedral group")
-        maximum = self.group.n // 2
+        maximum = full_harmonic_bandlimit(self.group)
         self.max_frequency = maximum if max_frequency is None else int(max_frequency)
         if not 0 <= self.max_frequency <= maximum:
             raise ValueError(f"max_frequency must be between 0 and {maximum} for {self.group.name}")
@@ -53,7 +61,8 @@ class CircularHarmonics(nn.Module):
         layout: list[tuple[int, str]] = [(0, "cos")]
         representations.append(self.group.trivial_representation)
         for frequency in range(1, self.max_frequency + 1):
-            nyquist = self.group.n % 2 == 0 and frequency == self.group.n // 2
+            residue = frequency % self.group.n
+            nyquist = self.group.n % 2 == 0 and residue == self.group.n // 2
             if isinstance(self.group, CyclicGroup):
                 if nyquist:
                     representations.extend((self.group.irrep(frequency), self.group.irrep(frequency)))
@@ -61,13 +70,19 @@ class CircularHarmonics(nn.Module):
                 else:
                     representations.append(self.group.irrep(frequency))
                     layout.append((frequency, "pair"))
+            elif residue == 0:
+                representations.extend((self.group.irrep(0, 0), self.group.irrep(1, 0)))
+                layout.extend(((frequency, "cos"), (frequency, "sin")))
             elif nyquist:
                 representations.extend(
-                    (self.group.irrep(0, frequency), self.group.irrep(1, frequency))
+                    (self.group.irrep(0, residue), self.group.irrep(1, residue))
                 )
                 layout.extend(((frequency, "cos"), (frequency, "sin")))
+            elif residue > self.group.n // 2:
+                representations.append(self.group.irrep(1, self.group.n - residue))
+                layout.append((frequency, "conjugate_pair"))
             else:
-                representations.append(self.group.irrep(1, frequency))
+                representations.append(self.group.irrep(1, residue))
                 layout.append((frequency, "pair"))
         self.out_type = FieldType(self.space, representations)
         self.rep_out = self.out_type.representation
@@ -97,6 +112,8 @@ class CircularHarmonics(nn.Module):
             phase = frequency * angles
             if mode == "pair":
                 values.append(pair_scale * torch.stack((torch.cos(phase), torch.sin(phase)), dim=-1))
+            elif mode == "conjugate_pair":
+                values.append(pair_scale * torch.stack((torch.cos(phase), -torch.sin(phase)), dim=-1))
             elif mode == "cos":
                 values.append((scalar_scale * torch.cos(phase)).unsqueeze(-1))
             else:
@@ -145,12 +162,14 @@ class RestrictedSphericalHarmonics(nn.Module):
             space_or_group = group
         if degrees is None:
             degrees = ls
-        if space_or_group is None or degrees is None:
-            raise ValueError("supply a group/space and degrees/ls")
+        if space_or_group is None:
+            raise ValueError("supply a group/space")
         self.space = space_or_group if isinstance(space_or_group, GSpace) else no_base_space(space_or_group)
         self.group = self.space.fibergroup
         if not isinstance(self.group, (CyclicGroup, DihedralGroup)):
             raise TypeError("restricted spherical harmonics require C_n or D_n")
+        if degrees is None:
+            degrees = range(full_harmonic_bandlimit(self.group) + 1)
         self.degrees = (int(degrees),) if isinstance(degrees, int) else tuple(map(int, degrees))
         if not self.degrees or any(degree < 0 for degree in self.degrees):
             raise ValueError("degrees must contain nonnegative integers")
@@ -195,13 +214,18 @@ class RestrictedSphericalHarmonics(nn.Module):
 
 def spherical_harmonics(
     group: FiniteGroup,
-    degrees: int | list[int] | tuple[int, ...],
-    vectors: torch.Tensor,
+    degrees: int | list[int] | tuple[int, ...] | torch.Tensor | None = None,
+    vectors: torch.Tensor | None = None,
     *,
     normalize: bool = True,
     normalization: str = "component",
 ) -> torch.Tensor:
-    """Functional restricted e3nn spherical harmonics."""
+    """Functional restricted e3nn spherical harmonics with a full-band default."""
+    if vectors is None and isinstance(degrees, torch.Tensor):
+        vectors = degrees
+        degrees = None
+    if vectors is None:
+        raise ValueError("supply vectors as the second or third argument")
     return RestrictedSphericalHarmonics(
         group, degrees, normalize=normalize, normalization=normalization
     )(vectors)

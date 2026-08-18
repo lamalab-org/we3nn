@@ -3,7 +3,15 @@ import math
 import pytest
 import torch
 
-from we3nn import CircularHarmonics, RestrictedSphericalHarmonics, cyclic_group, dihedral_group, planar_o3
+from we3nn import (
+    CircularHarmonics,
+    RestrictedSphericalHarmonics,
+    cyclic_group,
+    dihedral_group,
+    full_harmonic_bandlimit,
+    planar_o3,
+    spherical_harmonics,
+)
 
 
 def _transform_angles(group, angles, element):
@@ -41,12 +49,48 @@ def test_even_group_nyquist_layouts():
     cyclic = CircularHarmonics(cyclic_group(6))
     dihedral = CircularHarmonics(dihedral_group(6))
     assert [rep.id for rep in cyclic.out_type][-2:] == [(3,), (3,)]
-    assert [rep.id for rep in dihedral.out_type][-2:] == [(0, 3), (1, 3)]
+    assert [rep.id for rep in dihedral.out_type][3:5] == [(0, 3), (1, 3)]
+    assert [rep.id for rep in dihedral.out_type][-2:] == [(0, 0), (1, 0)]
 
 
 def test_invalid_aliased_frequency_is_rejected():
     with pytest.raises(ValueError, match="between"):
-        CircularHarmonics(dihedral_group(6), max_frequency=4)
+        CircularHarmonics(dihedral_group(6), max_frequency=7)
+
+
+@pytest.mark.parametrize(
+    "group,expected",
+    [
+        (cyclic_group(5), 2),
+        (cyclic_group(6), 3),
+        (dihedral_group(5), 5),
+        (dihedral_group(6), 6),
+    ],
+)
+def test_full_harmonic_bandlimit_defaults(group, expected):
+    assert full_harmonic_bandlimit(group) == expected
+    circular = CircularHarmonics(group)
+    spherical = RestrictedSphericalHarmonics(group)
+    assert circular.max_frequency == expected
+    assert circular.out_type.size == 1 + 2 * expected
+    assert spherical.degrees == tuple(range(expected + 1))
+
+
+def test_custom_harmonic_bandlimits_remain_available():
+    group = dihedral_group(6)
+    circular = CircularHarmonics(group, max_frequency=4)
+    spherical = RestrictedSphericalHarmonics(group, degrees=[0, 2, 4])
+    assert circular.max_frequency == 4
+    assert spherical.degrees == (0, 2, 4)
+
+
+def test_functional_spherical_harmonics_support_default_and_custom_degrees():
+    group = cyclic_group(5)
+    vectors = torch.randn(4, 3)
+    default = spherical_harmonics(group, vectors)
+    custom = spherical_harmonics(group, [0, 1], vectors)
+    assert default.shape == (4, 1 + 3 + 5)
+    assert custom.shape == (4, 1 + 3)
 
 
 @pytest.mark.parametrize("group", [cyclic_group(5), dihedral_group(6)])
