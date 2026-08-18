@@ -31,7 +31,7 @@ def benchmark_linear(fields):
     symmetry = group.DihedralGroup(6)
     representation = fields * symmetry.regular_representation()
     start = time.perf_counter_ns()
-    module = group.nn.Linear(representation, representation)
+    module = group.nn.WELinear(representation, representation)
     construction = (time.perf_counter_ns() - start) / 1e6
     tensor = torch.randn(512, representation.dim, requires_grad=True)
     value = tensor
@@ -44,7 +44,7 @@ def benchmark_linear(fields):
 
     backward_ms = timed(backward, repeats=10)
     print(
-        f"Linear {fields} regular fields: construct={construction:.3f} ms, "
+        f"WELinear {fields} regular fields: construct={construction:.3f} ms, "
         f"forward={forward:.3f} ms, backward={backward_ms:.3f} ms, "
         f"parameters={sum(p.numel() for p in module.parameters())}, storage={storage(module)/1024:.1f} KiB"
     )

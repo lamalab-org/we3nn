@@ -55,7 +55,7 @@ def test_arbitrary_supplied_representations_support_linear_cg_and_tensor_product
     }
     supplied = group.representation(matrices, name="two signs")
     regular = group.regular_repr
-    linear = nn.Linear(supplied, regular)
+    linear = nn.WELinear(supplied, regular)
     x = torch.randn(5, supplied.dim)
     y = linear(x)
     product = nn.TensorProduct(supplied, supplied, group.trivial_representation)

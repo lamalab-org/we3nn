@@ -12,7 +12,7 @@ from .field_type import FieldType, as_field_type
 from .tensor_product import TensorProduct
 
 
-class WignerEckartTensorProduct(nn.Module):
+class WETensorProduct(nn.Module):
     """Separate fixed finite-group coupling tensors from reduced weights."""
 
     def __init__(self, rep_in: FieldType | Representation, rep_filter: FieldType | Representation, rep_out: FieldType | Representation, *, shared_weights: bool = False):
@@ -113,7 +113,7 @@ class WignerEckartTensorProduct(nn.Module):
         return kernels
 
 
-class RestrictedWignerEckartTensorProduct(WignerEckartTensorProduct):
+class RestrictedWETensorProduct(WETensorProduct):
     """Wigner--Eckart product using O(3) harmonics restricted to a subgroup.
 
     Pass a :class:`RestrictedSphericalHarmonics` module as ``rep_filter`` to

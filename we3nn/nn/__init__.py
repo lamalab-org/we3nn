@@ -1,26 +1,26 @@
 """Equivariant PyTorch tensor modules for finite groups."""
 
 from .field_type import FieldType
-from .linear import Linear
-from .nonlinearities import ELU, ReLU, PointwiseActivation, PointwiseNonLinearity
+from .linear import WELinear
+from .nonlinearities import ELU, ReLU, PointActiv, PointwiseNonLinearity
 from .sequential import SequentialModule
 from .tensor_product import FullTensorProduct, FullyConnectedTensorProduct, TensorProduct, TensorProductInstruction
-from .wigner_eckart import RestrictedWignerEckartTensorProduct, WignerEckartTensorProduct
+from .wigner_eckart import RestrictedWETensorProduct, WETensorProduct
 
 __all__ = [
     "ELU",
     "FieldType",
     "FullyConnectedTensorProduct",
     "FullTensorProduct",
-    "Linear",
+    "WELinear",
     "PointwiseNonLinearity",
-    "PointwiseActivation",
+    "PointActiv",
     "ReLU",
     "SequentialModule",
     "TensorProduct",
     "TensorProductInstruction",
-    "WignerEckartTensorProduct",
-    "RestrictedWignerEckartTensorProduct",
+    "WETensorProduct",
+    "RestrictedWETensorProduct",
 ]
 
 # Kept here as a lazy import target to avoid a package import cycle.

@@ -11,7 +11,7 @@ The public API is available directly beside upstream e3nn:
 from we3nn import group
 
 G = group.DihedralGroup(6)
-layer = group.nn.Linear(G.standard_representation(), G.regular_representation())
+layer = group.nn.WELinear(G.standard_representation(), G.regular_representation())
 ```
 
 All finite-group modules consume and return ordinary `torch.Tensor` objects.
@@ -53,9 +53,9 @@ scalars_and_vectors = 8 * scalar + 2 * vector
 regular = 4 * G.regular_representation()
 
 model = torch.nn.Sequential(
-    group.nn.Linear(scalars_and_vectors, regular),
-    group.nn.PointwiseActivation(regular, torch.relu),
-    group.nn.Linear(regular, scalars_and_vectors),
+    group.nn.WELinear(scalars_and_vectors, regular),
+    group.nn.PointActiv(regular, torch.relu),
+    group.nn.WELinear(regular, scalars_and_vectors),
 )
 x = torch.randn(32, scalars_and_vectors.dim)
 y = model(x)
@@ -86,7 +86,7 @@ Restricted Wigner--Eckart products can own the spherical-harmonic evaluator
 and expose the complete sampled matrix-valued kernel basis:
 
 ```python
-restricted_tp = group.nn.RestrictedWignerEckartTensorProduct(
+restricted_tp = group.nn.RestrictedWETensorProduct(
     vector,
     spatial,
     vector,
@@ -122,7 +122,7 @@ e3nn-like multiplicity container.
 
 `MatrixFiniteGroup` supports arbitrary finite groups from deterministic
 multiplication and inverse tables. User-provided orthogonal representations
-then work with `intertwiner_basis`, `Linear`, CG construction, and tensor
+then work with `intertwiner_basis`, `WELinear`, CG construction, and tensor
 products without automatic character-theory or irrep enumeration.
 
 ## Development

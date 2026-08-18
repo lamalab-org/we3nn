@@ -9,7 +9,7 @@ def test_linear_and_tensor_product_compile_smoke_outputs_and_gradients():
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(4).fibergroup)
     vector = nn.FieldType(space, [space.irrep(1, 1)])
     regular = nn.FieldType(space, [space.regular_repr])
-    linear = nn.Linear(vector, regular)
+    linear = nn.WELinear(vector, regular)
     product = nn.TensorProduct(vector, vector, regular)
     compiled_linear = torch.compile(linear, backend="eager")
     compiled_product = torch.compile(product, backend="eager")
@@ -26,7 +26,7 @@ def test_linear_and_tensor_product_compile_smoke_outputs_and_gradients():
 def test_wigner_eckart_compile_smoke_outputs_and_gradients():
     group = gspaces.flipRot2dOnR2(4).fibergroup
     vector, scalar = group.irrep(1, 1), group.irrep(0, 0)
-    module = nn.WignerEckartTensorProduct(vector, vector, scalar).double()
+    module = nn.WETensorProduct(vector, vector, scalar).double()
     compiled = torch.compile(module, backend="eager")
     left = torch.randn(4, 2, dtype=torch.float64, requires_grad=True)
     right = torch.randn(4, 2, dtype=torch.float64, requires_grad=True)

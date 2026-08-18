@@ -71,7 +71,7 @@ def test_d6_linear_has_same_number_of_trainable_degrees_of_freedom_as_escnn():
     esc_out = escnn_nn.FieldType(esc_space, 4 * [esc_space.regular_repr])
     our_out = nn.FieldType(our_space, 4 * [our_space.regular_repr])
     esc_layer = escnn_nn.Linear(esc_in, esc_out, bias=True)
-    our_layer = nn.Linear(our_in, our_out, bias=True)
+    our_layer = nn.WELinear(our_in, our_out, bias=True)
     assert sum(parameter.numel() for parameter in our_layer.parameters()) == sum(
         parameter.numel() for parameter in esc_layer.parameters()
     )
@@ -159,7 +159,7 @@ def test_restricted_wigner_eckart_sampled_kernel_space_matches_escnn():
         degrees=range(maximum_frequency + 1),
         normalization="component",
     )
-    ours = nn.RestrictedWignerEckartTensorProduct(
+    ours = nn.RestrictedWETensorProduct(
         ours_space.irrep(1, 1),
         harmonics,
         ours_space.irrep(1, 1),
@@ -247,7 +247,7 @@ def test_synchronized_d6_linear_forward_matches_escnn():
     esc_out = escnn_nn.FieldType(esc_space, 2 * [esc_space.regular_repr])
     our_out = nn.FieldType(our_space, 2 * [our_space.regular_repr])
     esc_layer = escnn_nn.Linear(esc_in, esc_out, bias=True).double()
-    our_layer = nn.Linear(our_in, our_out, bias=True).double()
+    our_layer = nn.WELinear(our_in, our_out, bias=True).double()
     esc_weight, esc_bias = esc_layer.expand_parameters()
     target = torch.cat((esc_weight.flatten(), esc_bias.flatten())).detach()
     physical_basis = _physical_basis(our_layer)
@@ -300,12 +300,12 @@ def test_synchronized_d6_message_trunk_and_heads_match_escnn_at_every_stage():
     our_z = nn.FieldType(our_space, [our_space.irrep(0, 0)])
 
     esc_trunk_linears = [escnn_nn.Linear(esc_in, esc_hidden)] + [escnn_nn.Linear(esc_hidden, esc_hidden) for _ in range(3)]
-    our_trunk_linears = [nn.Linear(our_in, our_hidden)] + [nn.Linear(our_hidden, our_hidden) for _ in range(3)]
-    esc_scalar_head, our_scalar_head = escnn_nn.Linear(esc_hidden, esc_scalar), nn.Linear(our_hidden, our_scalar)
+    our_trunk_linears = [nn.WELinear(our_in, our_hidden)] + [nn.WELinear(our_hidden, our_hidden) for _ in range(3)]
+    esc_scalar_head, our_scalar_head = escnn_nn.Linear(esc_hidden, esc_scalar), nn.WELinear(our_hidden, our_scalar)
     esc_vector_linears = [escnn_nn.Linear(esc_hidden, esc_hidden), escnn_nn.Linear(esc_hidden, esc_vector)]
-    our_vector_linears = [nn.Linear(our_hidden, our_hidden), nn.Linear(our_hidden, our_vector)]
+    our_vector_linears = [nn.WELinear(our_hidden, our_hidden), nn.WELinear(our_hidden, our_vector)]
     esc_z_linears = [escnn_nn.Linear(esc_hidden, esc_hidden), escnn_nn.Linear(esc_hidden, esc_z)]
-    our_z_linears = [nn.Linear(our_hidden, our_hidden), nn.Linear(our_hidden, our_z)]
+    our_z_linears = [nn.WELinear(our_hidden, our_hidden), nn.WELinear(our_hidden, our_z)]
     all_pairs = list(zip(our_trunk_linears, esc_trunk_linears)) + [
         (our_scalar_head, esc_scalar_head),
         *zip(our_vector_linears, esc_vector_linears),

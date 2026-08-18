@@ -50,7 +50,7 @@ class ELU(PointwiseNonLinearity):
         super().__init__(in_type, lambda tensor: F.elu(tensor, alpha=self.alpha, inplace=self.inplace))
 
 
-class PointwiseActivation(PointwiseNonLinearity):
+class PointActiv(PointwiseNonLinearity):
     """Generic pointwise activation accepting a Representation and raw tensors."""
 
     def __init__(self, representation: FieldType | Representation, activation: Callable[[torch.Tensor], torch.Tensor]):

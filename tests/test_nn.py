@@ -29,11 +29,11 @@ def _assert_module_equivariant(module, input_type, group, *, atol=2e-5):
 def test_linear_and_regular_nonlinearity_equivariance(kind, n):
     space, input_type, regular_type = _types(kind, n)
     model = nn.SequentialModule(
-        nn.Linear(input_type, regular_type),
+        nn.WELinear(input_type, regular_type),
         nn.ReLU(regular_type),
-        nn.Linear(regular_type, regular_type),
+        nn.WELinear(regular_type, regular_type),
         nn.ELU(regular_type),
-        nn.Linear(regular_type, input_type),
+        nn.WELinear(regular_type, input_type),
     )
     _assert_module_equivariant(model, input_type, space.fibergroup)
     assert model.evaluate_output_shape((11, input_type.size)) == (11, input_type.size)
@@ -41,7 +41,7 @@ def test_linear_and_regular_nonlinearity_equivariance(kind, n):
 
 def test_linear_gradients_reach_every_parameter():
     _, input_type, regular_type = _types("dihedral", 6)
-    layer = nn.Linear(input_type, regular_type)
+    layer = nn.WELinear(input_type, regular_type)
     x = torch.randn(7, input_type.size, requires_grad=True)
     layer(x).square().mean().backward()
     assert x.grad is not None
@@ -52,7 +52,7 @@ def test_linear_gradients_reach_every_parameter():
 def test_bias_is_invariant_and_nontrivial_outputs_have_no_bias():
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
     vector_type = nn.FieldType(space, [space.irrep(1, 1)])
-    layer = nn.Linear(vector_type, vector_type, bias=True)
+    layer = nn.WELinear(vector_type, vector_type, bias=True)
     assert sum(parameter.numel() for parameter in layer.bias_parameters) == 0
     _assert_module_equivariant(layer, vector_type, space.fibergroup)
 
@@ -67,13 +67,13 @@ def test_pointwise_rejects_vector_irrep():
 def test_type_and_shape_errors_are_early():
     space, input_type, regular_type = _types("dihedral", 6)
     with pytest.raises(ValueError, match="last dimension"):
-        nn.Linear(input_type, regular_type)(torch.randn(2, input_type.size + 1))
+        nn.WELinear(input_type, regular_type)(torch.randn(2, input_type.size + 1))
 
 
 def test_large_group_regular_setup_uses_quadratic_permutation_indices():
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(128).fibergroup)
     type_ = nn.FieldType(space, [space.regular_repr])
-    layer = nn.Linear(type_, type_)
+    layer = nn.WELinear(type_, type_)
     pair = layer._pairs[0]
     assert pair.basis.numel() == 0
     assert pair.relative.shape == (256, 256)
@@ -86,7 +86,7 @@ def test_double_rebuilds_intertwiner_basis_at_float64_precision():
     space = gspaces.no_base_space(gspaces.rot2dOnR2(3).fibergroup)
     input_type = nn.FieldType(space, [space.irrep(1), space.regular_repr, space.irrep(0)])
     output_type = nn.FieldType(space, [space.regular_repr, space.irrep(1)])
-    layer = nn.Linear(input_type, output_type).double()
+    layer = nn.WELinear(input_type, output_type).double()
     x = torch.randn(4, input_type.size, dtype=torch.float64)
     y = layer(x)
     for element in space.fibergroup.elements:
@@ -102,7 +102,7 @@ def test_valid_parameterless_zero_map_tracks_dtype_and_device():
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
     input_type = nn.FieldType(space, [space.irrep(1, 1)])
     output_type = nn.FieldType(space, [space.irrep(1, 2)])
-    layer = nn.Linear(input_type, output_type, bias=True).double()
+    layer = nn.WELinear(input_type, output_type, bias=True).double()
     assert sum(parameter.numel() for parameter in layer.parameters()) == 0
     x = torch.randn(3, input_type.size, dtype=torch.float64)
     assert torch.equal(layer(x), torch.zeros(3, output_type.size, dtype=torch.float64))
@@ -114,8 +114,8 @@ def test_generic_and_structured_linear_backends_span_same_maps():
     in_type = nn.FieldType(space, [space.irrep(0, 0), space.irrep(1, 1)])
     out_type = nn.FieldType(space, [space.irrep(1, 1), space.irrep(0, 0)])
     modules = [
-        nn.Linear(in_type, out_type, bias=False, backend="structured").double(),
-        nn.Linear(in_type, out_type, bias=False, backend="generic").double(),
+        nn.WELinear(in_type, out_type, bias=False, backend="structured").double(),
+        nn.WELinear(in_type, out_type, bias=False, backend="generic").double(),
     ]
     bases = []
     for module in modules:
@@ -134,7 +134,7 @@ def test_generic_and_structured_linear_backends_span_same_maps():
 
 def test_no_grad_linear_cache_invalidates_after_parameter_update():
     _, input_type, regular_type = _types("dihedral", 6)
-    layer = nn.Linear(input_type, regular_type)
+    layer = nn.WELinear(input_type, regular_type)
     x = torch.randn(4, input_type.size)
     with torch.no_grad():
         before = layer(x)

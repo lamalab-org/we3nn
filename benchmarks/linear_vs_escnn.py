@@ -1,4 +1,4 @@
-"""Compare the D6 Linear used by the message-passing example.
+"""Compare the D6 WELinear used by the message-passing example.
 
 Run in an environment containing the optional ``reference`` dependencies.
 The timing deliberately excludes construction and uses one CPU thread.
@@ -51,13 +51,13 @@ def main() -> None:
     our_in = scalar_inputs * symmetry.trivial_irrep + 2 * symmetry.standard_representation()
     our_out = (hidden_channels // 2) * symmetry.regular_representation()
     our_layer = torch.nn.Sequential(
-        group.nn.Linear(our_in, our_out),
-        group.nn.PointwiseActivation(our_out, torch.relu),
-        group.nn.Linear(our_out, our_out),
-        group.nn.PointwiseActivation(our_out, torch.relu),
-        group.nn.Linear(our_out, our_out),
-        group.nn.PointwiseActivation(our_out, torch.relu),
-        group.nn.Linear(our_out, our_out),
+        group.nn.WELinear(our_in, our_out),
+        group.nn.PointActiv(our_out, torch.relu),
+        group.nn.WELinear(our_out, our_out),
+        group.nn.PointActiv(our_out, torch.relu),
+        group.nn.WELinear(our_out, our_out),
+        group.nn.PointActiv(our_out, torch.relu),
+        group.nn.WELinear(our_out, our_out),
     )
     tensor = torch.randn(edges, our_in.dim)
     our_input = tensor

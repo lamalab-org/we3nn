@@ -13,8 +13,8 @@ def test_plan_script_raw_tensor_acceptance_api():
     regular = group.regular_representation()
     rep_in = 3 * scalar + vector + vector
     rep_hidden = 2 * regular
-    linear = nn.Linear(rep_in, rep_hidden)
-    activation = nn.PointwiseActivation(rep_hidden, torch.relu)
+    linear = nn.WELinear(rep_in, rep_hidden)
+    activation = nn.PointActiv(rep_hidden, torch.relu)
     x = torch.randn(7, rep_in.dim)
     y = activation(linear(x))
     assert y.shape == (7, rep_hidden.dim)
@@ -36,17 +36,33 @@ def test_raw_tensor_tensor_product_api():
     assert product(x, y).shape == (4, 1)
 
 
-def test_e3nn_group_namespace_and_upstream_o3_coexist():
+def test_we3nn_group_namespace_and_upstream_o3_coexist():
     from e3nn import o3
     from we3nn import group
 
     finite = group.DihedralGroup(6)
     assert finite.order == 12
     assert o3.Irrep("1o").dim == 3
-    value = group.nn.Linear(finite.trivial_irrep, finite.regular_representation())(
+    value = group.nn.WELinear(finite.trivial_irrep, finite.regular_representation())(
         torch.randn(3, 1)
     )
     assert value.shape == (3, 12)
+    assert group.WELinear is group.nn.WELinear
+    assert group.PointActiv is group.nn.PointActiv
+    assert group.WETensorProduct is group.nn.WETensorProduct
+    assert group.RestrictedWETensorProduct is group.nn.RestrictedWETensorProduct
+
+
+def test_obsolete_neural_module_names_are_not_exported():
+    from we3nn import nn
+
+    for name in (
+        "Linear",
+        "PointwiseActivation",
+        "WignerEckartTensorProduct",
+        "RestrictedWignerEckartTensorProduct",
+    ):
+        assert not hasattr(nn, name)
 
 
 def test_full_tensor_product_raw_api_and_instruction_metadata():

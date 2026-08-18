@@ -28,7 +28,7 @@ def test_native_finite_wigner_eckart_with_per_sample_reduced_weights():
     node = nn.FieldType(space, [space.irrep(1, 1)])
     filter_type = nn.FieldType(space, [space.irrep(1, 2)])
     output = nn.FieldType(space, [space.irrep(0, 0), space.irrep(1, 1)])
-    module = nn.WignerEckartTensorProduct(node, filter_type, output)
+    module = nn.WETensorProduct(node, filter_type, output)
     x = torch.randn(8, node.size)
     filters = torch.randn(8, filter_type.size)
     weights = torch.randn(8, module.weight_numel, requires_grad=True)
@@ -46,7 +46,7 @@ def test_restricted_o3_filter_uses_full_finite_group_couplings():
     node = nn.FieldType(space, [node_rep])
     filter_type = nn.FieldType(space, [filter_rep])
     output = nn.FieldType(space, [output_rep])
-    module = nn.RestrictedWignerEckartTensorProduct(node, filter_type, output)
+    module = nn.RestrictedWETensorProduct(node, filter_type, output)
     x = torch.randn(3, node.size)
     filters = torch.randn(3, filter_type.size)
     weights = torch.randn(3, module.weight_numel)
@@ -65,7 +65,7 @@ def test_restricted_wigner_eckart_samples_physical_kernel_basis_from_points():
         degrees=[0, 1, 2],
         normalization="component",
     )
-    module = nn.RestrictedWignerEckartTensorProduct(
+    module = nn.RestrictedWETensorProduct(
         space.irrep(1, 1),
         harmonics,
         space.irrep(1, 1),
@@ -92,7 +92,7 @@ def test_restricted_wigner_eckart_samples_physical_kernel_basis_from_points():
 def test_restricted_wigner_eckart_rejects_unrestricted_finite_filters():
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
     with pytest.raises(TypeError, match=r"restricted O\(3\)"):
-        nn.RestrictedWignerEckartTensorProduct(
+        nn.RestrictedWETensorProduct(
             space.irrep(1, 1),
             space.irrep(1, 1),
             space.irrep(0, 0),

@@ -12,12 +12,12 @@ def test_d6_message_mlp_pattern_is_drop_in_and_equivariant():
     scalar_out = hidden_channels * group.trivial_irrep
     vector_out = group.standard_representation()
     message_mlp = torch.nn.Sequential(
-        nn.Linear(c_in, c_out), nn.PointwiseActivation(c_out, torch.relu),
-        nn.Linear(c_out, c_out), nn.PointwiseActivation(c_out, torch.relu)
+        nn.WELinear(c_in, c_out), nn.PointActiv(c_out, torch.relu),
+        nn.WELinear(c_out, c_out), nn.PointActiv(c_out, torch.relu)
     )
-    scalar_head = nn.Linear(c_out, scalar_out)
+    scalar_head = nn.WELinear(c_out, scalar_out)
     vector_head = torch.nn.Sequential(
-        nn.Linear(c_out, c_out), nn.PointwiseActivation(c_out, torch.nn.functional.elu), nn.Linear(c_out, vector_out)
+        nn.WELinear(c_out, c_out), nn.PointActiv(c_out, torch.nn.functional.elu), nn.WELinear(c_out, vector_out)
     )
     x = torch.randn(23, c_in.size)
     message = message_mlp(x)

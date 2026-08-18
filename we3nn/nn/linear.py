@@ -231,7 +231,7 @@ class _BiasExpansion(nn.Module):
         return self
 
 
-class Linear(nn.Module):
+class WELinear(nn.Module):
     """A complete learnable equivariant map between finite-group fields.
 
     Parameters are stored in a minimal intertwiner basis. The dense kernel is
@@ -351,7 +351,7 @@ class Linear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not isinstance(input, torch.Tensor):
-            raise TypeError("Linear expects an ordinary torch.Tensor")
+            raise TypeError("WELinear expects an ordinary torch.Tensor")
         if input.shape[-1] != self.in_type.size:
             raise ValueError(f"expected last dimension {self.in_type.size}, got {input.shape[-1]}")
         if torch.is_grad_enabled():
