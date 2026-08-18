@@ -39,9 +39,9 @@ from .nn import (
     MissingRepresentationMetadataWarning,
     PointActiv,
     RepresentationTensor,
-    RestrictedWETensorProduct,
+    SphericalKernelTensorProduct,
     WELinear,
-    WETensorProduct,
+    KernelTensorProduct,
 )
 
 __all__ = [
@@ -63,12 +63,12 @@ __all__ = [
     "Representation",
     "RepresentationTensor",
     "RestrictedSphericalHarmonics",
-    "RestrictedWETensorProduct",
+    "SphericalKernelTensorProduct",
     "RestrictedO3Representation",
     "IrrepDecomposition",
     "TensorProductRepresentation",
     "WELinear",
-    "WETensorProduct",
+    "KernelTensorProduct",
     "cyclic_group",
     "circular_harmonics",
     "clebsch_gordan",
@@ -94,4 +94,4 @@ __all__ = [
     "tensor_product_representation",
 ]
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"

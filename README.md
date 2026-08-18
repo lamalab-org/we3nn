@@ -50,8 +50,8 @@ nonlinear equivariant models:
 | `TensorProduct` | Configurable equivariant field couplings | Internal or external | Requested representations |
 | `FullyConnectedTensorProduct` | Every compatible coupling path | Internal or external | Requested representations |
 | `FullTensorProduct` | Complete unprojected Kronecker product | None | Product-coordinate basis |
-| `WETensorProduct` | Fixed coupling tensors plus reduced coefficients | External | Requested representations |
-| `RestrictedWETensorProduct` | Wigner--Eckart kernels from restricted e3nn spherical harmonics | External/radial | Requested representations |
+| `KernelTensorProduct` | Fixed coupling tensors plus reduced coefficients | External | Requested representations |
+| `SphericalKernelTensorProduct` | Kernels from restricted e3nn spherical harmonics | External/radial | Requested representations |
 
 All five validate `RepresentationTensor` metadata. Raw feature tensors emit
 `MissingRepresentationMetadataWarning` and continue through the compatible
@@ -139,19 +139,19 @@ Passing raw tensors to a tensor product returns a raw tensor and emits
 operation warns and returns a raw tensor. When every representation-carrying
 input is wrapped, the result is a `RepresentationTensor`.
 
-Restricted Wigner--Eckart products can own the spherical-harmonic evaluator
-and expose the complete sampled matrix-valued kernel basis:
+Spherical kernel tensor products can own the restricted spherical-harmonic
+evaluator and expose the complete sampled matrix-valued kernel basis:
 
 ```python
-restricted_tp = group.nn.RestrictedWETensorProduct(
+spherical_tp = group.nn.SphericalKernelTensorProduct(
     vector,
     spatial,
     vector,
 )
 
 weights = radial_mlp(radial_features)
-messages = restricted_tp.forward_from_points(node_features, edge_vectors, weights)
-kernel_basis = restricted_tp.sample_kernel_basis(edge_vectors)
+messages = spherical_tp.forward_from_points(node_features, edge_vectors, weights)
+kernel_basis = spherical_tp.sample_kernel_basis(edge_vectors)
 ```
 
 The sampled basis has shape

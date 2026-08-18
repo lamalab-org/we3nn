@@ -84,7 +84,7 @@ def test_linear_activation_and_sequential_preserve_metadata():
     assert output.field_type == vector
 
 
-def test_full_and_wigner_eckart_tensor_products_support_metadata():
+def test_full_and_kernel_tensor_product_tensor_products_support_metadata():
     scalar, vector, _ = _d6_types()
     left = RepresentationTensor(torch.randn(4, 2), vector)
     right = RepresentationTensor(torch.randn(4, 2), vector)
@@ -92,20 +92,20 @@ def test_full_and_wigner_eckart_tensor_products_support_metadata():
     full_output = nn.FullTensorProduct(vector, vector)(left, right)
     assert isinstance(full_output, RepresentationTensor)
 
-    product = nn.WETensorProduct(vector, vector, scalar)
+    product = nn.KernelTensorProduct(vector, vector, scalar)
     weights = torch.randn(4, product.weight_numel)
     output = product(left, right, weights)
     assert isinstance(output, RepresentationTensor)
     assert output.field_type == scalar
 
 
-def test_restricted_wigner_eckart_propagates_known_harmonic_metadata():
+def test_spherical_kernel_tensor_product_propagates_known_harmonic_metadata():
     _, vector, _ = _d6_types()
     harmonics = RestrictedSphericalHarmonics(
         vector.fibergroup,
         degrees=[0, 1],
     )
-    product = nn.RestrictedWETensorProduct(vector, harmonics, vector)
+    product = nn.SphericalKernelTensorProduct(vector, harmonics, vector)
     features = vector.wrap(torch.randn(4, 2))
     points = torch.randn(4, 3)
     weights = torch.randn(4, product.weight_numel)

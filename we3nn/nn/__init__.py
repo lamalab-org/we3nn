@@ -5,7 +5,7 @@ from .linear import WELinear
 from .nonlinearities import ELU, ReLU, PointActiv, PointwiseNonLinearity
 from .sequential import SequentialModule
 from .tensor_product import FullTensorProduct, FullyConnectedTensorProduct, TensorProduct, TensorProductInstruction
-from .wigner_eckart import RestrictedWETensorProduct, WETensorProduct
+from .kernel_tensor_product import SphericalKernelTensorProduct, KernelTensorProduct
 from .representation_tensor import (
     MissingRepresentationMetadataWarning,
     RepresentationTensor,
@@ -25,8 +25,8 @@ __all__ = [
     "SequentialModule",
     "TensorProduct",
     "TensorProductInstruction",
-    "WETensorProduct",
-    "RestrictedWETensorProduct",
+    "KernelTensorProduct",
+    "SphericalKernelTensorProduct",
 ]
 
 # Kept here as a lazy import target to avoid a package import cycle.

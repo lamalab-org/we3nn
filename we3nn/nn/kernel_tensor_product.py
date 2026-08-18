@@ -1,4 +1,4 @@
-"""Finite-group Wigner--Eckart tensor products."""
+"""Finite-group tensor products specialized for steerable kernels."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from .representation_tensor import (
 )
 
 
-class WETensorProduct(nn.Module):
-    r"""Wigner--Eckart tensor product with externally supplied reduced weights.
+class KernelTensorProduct(nn.Module):
+    r"""Tensor product specialized for externally sampled filter features.
 
     ``features`` transform under ``rep_in`` and ``filter_features`` under
     ``rep_filter``. The module constructs the complete finite-group coupling
@@ -148,8 +148,8 @@ class WETensorProduct(nn.Module):
         return kernels
 
 
-class RestrictedWETensorProduct(WETensorProduct):
-    r"""Wigner--Eckart product using O(3) harmonics restricted to C_n or D_n.
+class SphericalKernelTensorProduct(KernelTensorProduct):
+    r"""Kernel tensor product using restricted e3nn spherical harmonics.
 
     Pass a :class:`RestrictedSphericalHarmonics` module as ``rep_filter`` to
     couple directly from points with :meth:`forward_from_points` and to sample

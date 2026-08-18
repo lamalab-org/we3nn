@@ -49,11 +49,12 @@ def test_we3nn_group_namespace_and_upstream_o3_coexist():
     assert value.shape == (3, 12)
     assert group.WELinear is group.nn.WELinear
     assert group.PointActiv is group.nn.PointActiv
-    assert group.WETensorProduct is group.nn.WETensorProduct
-    assert group.RestrictedWETensorProduct is group.nn.RestrictedWETensorProduct
+    assert group.KernelTensorProduct is group.nn.KernelTensorProduct
+    assert group.SphericalKernelTensorProduct is group.nn.SphericalKernelTensorProduct
 
 
 def test_obsolete_neural_module_names_are_not_exported():
+    import we3nn
     from we3nn import nn
 
     for name in (
@@ -61,8 +62,14 @@ def test_obsolete_neural_module_names_are_not_exported():
         "PointwiseActivation",
         "WignerEckartTensorProduct",
         "RestrictedWignerEckartTensorProduct",
+        "WETensorProduct",
+        "RestrictedWETensorProduct",
     ):
         assert not hasattr(nn, name)
+        assert not hasattr(we3nn, name)
+
+    assert we3nn.KernelTensorProduct is nn.KernelTensorProduct
+    assert we3nn.SphericalKernelTensorProduct is nn.SphericalKernelTensorProduct
 
 
 def test_full_tensor_product_raw_api_and_instruction_metadata():

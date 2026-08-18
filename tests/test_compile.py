@@ -23,10 +23,10 @@ def test_linear_and_tensor_product_compile_smoke_outputs_and_gradients():
 
 
 @pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")
-def test_wigner_eckart_compile_smoke_outputs_and_gradients():
+def test_kernel_tensor_product_compile_smoke_outputs_and_gradients():
     group = gspaces.flipRot2dOnR2(4).fibergroup
     vector, scalar = group.irrep(1, 1), group.irrep(0, 0)
-    module = nn.WETensorProduct(vector, vector, scalar).double()
+    module = nn.KernelTensorProduct(vector, vector, scalar).double()
     compiled = torch.compile(module, backend="eager")
     left = torch.randn(4, 2, dtype=torch.float64, requires_grad=True)
     right = torch.randn(4, 2, dtype=torch.float64, requires_grad=True)

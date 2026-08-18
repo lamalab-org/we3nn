@@ -147,7 +147,7 @@ def test_restricted_o3_representations_match_escnn_up_to_one_basis(degree):
         )
 
 
-def test_restricted_wigner_eckart_sampled_kernel_space_matches_escnn():
+def test_spherical_kernel_tensor_product_sampled_kernel_space_matches_escnn():
     from escnn import group as escnn_group
     from escnn.kernels import kernels_O3_subgroup_act_R3
 
@@ -159,7 +159,7 @@ def test_restricted_wigner_eckart_sampled_kernel_space_matches_escnn():
         degrees=range(maximum_frequency + 1),
         normalization="component",
     )
-    ours = nn.RestrictedWETensorProduct(
+    ours = nn.SphericalKernelTensorProduct(
         ours_space.irrep(1, 1),
         harmonics,
         ours_space.irrep(1, 1),
