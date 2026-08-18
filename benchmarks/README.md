@@ -8,10 +8,10 @@ Reference run on Apple Silicon with PyTorch 2.13.0 and escnn 1.0.11:
 
 | implementation | median forward | persistent tensor storage |
 | --- | ---: | ---: |
-| e3nn_WE | 0.528 ms | 537.3 KiB |
+| we3nn | 0.528 ms | 537.3 KiB |
 | escnn | 0.726 ms | 570.1 KiB |
 
-The script exits unsuccessfully if e3nn_WE exceeds escnn by more than a 5%
+The script exits unsuccessfully if we3nn exceeds escnn by more than a 5%
 timing-noise allowance or uses more persistent parameter/buffer storage.
 Numbers above are one reference run; use the script for results on the current
 machine and PyTorch build.
@@ -21,7 +21,7 @@ reports peak Python allocations via `tracemalloc`; tensor allocator peak
 memory is backend-specific and should be measured with the relevant CPU/GPU
 profiler for production workloads.
 
-The reported e3nn_WE storage includes version-invalidated expanded operators
+The reported we3nn storage includes version-invalidated expanded operators
 cached during `no_grad()` inference. Training remains fully differentiable
 and expands directly from the minimal learnable intertwiner coefficients.
 

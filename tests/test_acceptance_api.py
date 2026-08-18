@@ -2,7 +2,7 @@ import torch
 import importlib
 import pytest
 
-from e3nn_WE import DihedralGroup, nn
+from we3nn import DihedralGroup, nn
 
 
 def test_plan_script_raw_tensor_acceptance_api():
@@ -37,7 +37,8 @@ def test_raw_tensor_tensor_product_api():
 
 
 def test_e3nn_group_namespace_and_upstream_o3_coexist():
-    from e3nn import group, o3
+    from e3nn import o3
+    from we3nn import group
 
     finite = group.DihedralGroup(6)
     assert finite.order == 12
@@ -61,7 +62,7 @@ def test_full_tensor_product_raw_api_and_instruction_metadata():
 
 
 def test_explicit_full_finite_coupling_api():
-    from e3nn import group as finite
+    from we3nn import group as finite
 
     group = finite.CyclicGroup(5)
     public = finite.clebsch_gordan(group.irrep(1), group.irrep(1), group.trivial_irrep)
@@ -74,8 +75,8 @@ def test_explicit_full_finite_coupling_api():
 
 
 def test_tensor_wrapper_is_not_part_of_library():
-    from e3nn import group
+    from we3nn import group
 
     assert not hasattr(group.nn, "GeometricTensor")
     with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("e3nn_WE.nn.geometric_tensor")
+        importlib.import_module("we3nn.nn.geometric_tensor")

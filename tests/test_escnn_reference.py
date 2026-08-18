@@ -11,9 +11,9 @@ try:
 except ImportError as error:
     pytest.skip(f"complete escnn reference installation unavailable: {error}", allow_module_level=True)
 
-from e3nn_WE import cyclic_group, dihedral_group, gspaces, nn
-from e3nn_WE import clebsch_gordan, subspace_diagnostics
-from e3nn_WE import (
+from we3nn import cyclic_group, dihedral_group, gspaces, nn
+from we3nn import clebsch_gordan, subspace_diagnostics
+from we3nn import (
     RestrictedSphericalHarmonics,
     intertwiner_basis,
     tensor_product_representation,

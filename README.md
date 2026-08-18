@@ -1,4 +1,4 @@
-# e3nn_WE
+# we3nn
 
 Validated development base: e3nn `0.6.0` (upstream tag commit
 `2aa7f58440a06b15352a2cbce01fa4c26f824969`) and PyTorch `2.13.0`. The finite
@@ -8,7 +8,7 @@ subsystem is parallel to `e3nn.o3`; it does not modify O(3)'s `Irrep`,
 The public API is available directly beside upstream e3nn:
 
 ```python
-from e3nn import group
+from we3nn import group
 
 G = group.DihedralGroup(6)
 layer = group.nn.Linear(G.standard_representation(), G.regular_representation())
@@ -20,7 +20,7 @@ of the library API.
 
 The extension applies e3nn's representation approach to the finite planar
 groups C_n (rotations) and D_n (rotations and reflections). `mp_example.py`
-uses `e3nn.group` directly and does not require escnn-style spaces, field
+uses `we3nn.group` directly and does not require escnn-style spaces, field
 types, or typed tensor wrappers.
 
 The implementation uses real irreducible representations, complete
@@ -44,7 +44,7 @@ nonlinear equivariant models:
 
 ```python
 import torch
-from e3nn import group
+from we3nn import group
 
 G = group.DihedralGroup(6)
 scalar = G.trivial_irrep
@@ -64,7 +64,7 @@ y = model(x)
 ## Harmonics and tensor products
 
 ```python
-from e3nn import group
+from we3nn import group
 
 # Angular O(2) harmonics through the non-aliased D6 frequency limit.
 angular = group.CircularHarmonics(G, max_frequency=3)
@@ -134,7 +134,7 @@ python benchmarks/linear_vs_escnn.py
 ```
 
 The benchmark reports median forward latency plus persistent parameter and
-buffer storage. If escnn is unavailable it still reports e3nn_WE and explains
+buffer storage. If escnn is unavailable it still reports we3nn and explains
 how to enable the direct comparison. escnn 1.0.x's legacy dependencies do not
 currently build on Python 3.12; Python 3.10 can be used for that optional
 reference environment.

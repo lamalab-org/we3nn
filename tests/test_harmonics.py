@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from e3nn_WE import CircularHarmonics, RestrictedSphericalHarmonics, cyclic_group, dihedral_group, planar_o3
+from we3nn import CircularHarmonics, RestrictedSphericalHarmonics, cyclic_group, dihedral_group, planar_o3
 
 
 def _transform_angles(group, angles, element):

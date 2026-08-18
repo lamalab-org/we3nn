@@ -3,7 +3,7 @@ import itertools
 import pytest
 import torch
 
-from e3nn_WE import (
+from we3nn import (
     clebsch_gordan,
     cyclic_group,
     dihedral_group,
@@ -51,7 +51,7 @@ def test_cyclic_complex_type_reports_one_copy_but_tensor_product_has_two_real_we
     vector = group.irrep(1)
     scalar = group.irrep(0)
     assert clebsch_gordan(vector, scalar, vector).shape == (1, 2, 2, 1)
-    from e3nn_WE.clebsch_gordan import full_coupling_basis
+    from we3nn.clebsch_gordan import full_coupling_basis
 
     assert full_coupling_basis(vector, scalar, vector).shape == (2, 2, 2, 1)
     assert tensor_product_multiplicity(vector, scalar, vector) == 1
@@ -60,7 +60,7 @@ def test_cyclic_complex_type_reports_one_copy_but_tensor_product_has_two_real_we
 
 def test_cg_rejects_groups_with_equal_names_but_distinct_identity():
     left_group = cyclic_group(5)
-    from e3nn_WE import CyclicGroup
+    from we3nn import CyclicGroup
 
     right_group = CyclicGroup(5)
     with pytest.raises(ValueError, match="same group"):

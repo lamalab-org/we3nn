@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from e3nn_WE import gspaces, nn
+from we3nn import gspaces, nn
 
 
 def _assert_equivariant(module, input1, input2, atol=3e-10):
@@ -112,7 +112,7 @@ def test_tensor_product_gradcheck_inputs_and_external_weights():
 
 
 def test_explicit_coupling_instruction_and_unweighted_path():
-    from e3nn_WE.nn import TensorProductInstruction
+    from we3nn.nn import TensorProductInstruction
 
     group = gspaces.rot2dOnR2(5).fibergroup
     vector = group.irrep(1)

@@ -1,7 +1,7 @@
 import torch
 
 from mp_example import EquivariantMPLayer
-from e3nn_WE.utils import scatter
+from we3nn.utils import scatter
 
 
 def test_message_layer_uses_the_requested_regular_activation():

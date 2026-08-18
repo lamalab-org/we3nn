@@ -3,7 +3,7 @@ import itertools
 import pytest
 import torch
 
-from e3nn_WE import CyclicGroup, DihedralGroup, Irreps, cyclic_group, dihedral_group
+from we3nn import CyclicGroup, DihedralGroup, Irreps, cyclic_group, dihedral_group
 
 
 @pytest.mark.parametrize("factory,n", [(cyclic_group, 1), (cyclic_group, 2), (cyclic_group, 7), (dihedral_group, 1), (dihedral_group, 2), (dihedral_group, 6)])

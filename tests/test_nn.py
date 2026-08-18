@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from e3nn_WE import gspaces, nn
+from we3nn import gspaces, nn
 
 
 def _types(kind: str, n: int):

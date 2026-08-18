@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from e3nn_WE import gspaces, nn
+from we3nn import gspaces, nn
 
 
 @pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")

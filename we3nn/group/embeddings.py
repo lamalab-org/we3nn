@@ -1,4 +1,4 @@
 """Finite-subgroup embeddings into O(3)."""
 
-from e3nn_WE.embeddings import *
+from we3nn.embeddings import *
 

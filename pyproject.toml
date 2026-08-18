@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "e3nn-WE"
+name = "we3nn"
 version = "0.4.0"
 description = "e3nn-style equivariant neural-network primitives for finite cyclic and dihedral groups"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "e3nn_WE contributors" }]
+authors = [{ name = "we3nn contributors" }]
 dependencies = ["torch>=2.0", "e3nn>=0.6,<0.7"]
 
 [project.optional-dependencies]
@@ -18,7 +18,7 @@ reference = ["escnn>=1.0"]
 message-passing = []
 
 [tool.setuptools.packages.find]
-include = ["e3nn.group*", "e3nn_WE*"]
+include = ["we3nn*"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

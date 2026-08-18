@@ -2,7 +2,7 @@ import pytest
 import torch
 import math
 
-from e3nn_WE import (
+from we3nn import (
     Representation,
     cyclic_group,
     dihedral_group,
@@ -46,7 +46,7 @@ def test_cg_nullspace_and_reynolds_projectors_agree():
     for left in group.irreps():
         for right in group.irreps():
             for output in group.irreps():
-                from e3nn_WE import clebsch_gordan
+                from we3nn import clebsch_gordan
 
                 nullspace = clebsch_gordan(left, right, output, method="nullspace")
                 reynolds = clebsch_gordan(left, right, output, method="reynolds")

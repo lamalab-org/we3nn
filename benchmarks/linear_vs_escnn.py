@@ -12,7 +12,7 @@ import tracemalloc
 
 import torch
 
-from e3nn import group
+from we3nn import group
 
 
 def storage_bytes(module: torch.nn.Module) -> int:
@@ -65,7 +65,7 @@ def main() -> None:
     our_storage = storage_bytes(our_layer)
     our_python_peak = peak_python_bytes(lambda: our_layer(our_input))
     print(
-        f"e3nn_WE: {our_ms:.3f} ms, {our_storage / 1024:.1f} KiB persistent storage, "
+        f"we3nn: {our_ms:.3f} ms, {our_storage / 1024:.1f} KiB persistent storage, "
         f"{our_python_peak / 1024:.1f} KiB peak Python allocation"
     )
 
@@ -98,9 +98,9 @@ def main() -> None:
     print(f"ratios: {our_ms / esc_ms:.3f}x time, {our_storage / esc_storage:.3f}x storage")
 
     if our_ms > esc_ms * 1.05:
-        raise SystemExit("e3nn_WE is more than 5% slower than escnn")
+        raise SystemExit("we3nn is more than 5% slower than escnn")
     if our_storage > esc_storage:
-        raise SystemExit("e3nn_WE uses more persistent tensor storage than escnn")
+        raise SystemExit("we3nn uses more persistent tensor storage than escnn")
 
 
 if __name__ == "__main__":

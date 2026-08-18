@@ -1,6 +1,6 @@
 import torch
 
-from e3nn_WE import DihedralGroup, nn
+from we3nn import DihedralGroup, nn
 
 
 def test_d6_message_mlp_pattern_is_drop_in_and_equivariant():

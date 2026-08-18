@@ -2,7 +2,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from e3nn_WE import cyclic_group, dihedral_group, planar_o3, restrict_o3, restricted_o3_couplings
+from we3nn import cyclic_group, dihedral_group, planar_o3, restrict_o3, restricted_o3_couplings
 
 
 def test_planar_embedding_and_l1_xy_z_decomposition():
@@ -66,7 +66,7 @@ def test_o3_coupling_is_inside_full_d6_intertwiner_space_and_space_can_be_larger
         )
         torch.testing.assert_close(transformed, inherited, atol=3e-6, rtol=3e-6)
 
-    from e3nn_WE import intertwiner_basis, tensor_product_representation
+    from we3nn import intertwiner_basis, tensor_product_representation
 
     full = intertwiner_basis(tensor_product_representation(left, right), output)
     assert full.shape[0] >= inherited.shape[0]

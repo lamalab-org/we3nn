@@ -1,6 +1,6 @@
 import torch
 
-from e3nn_WE.utils import edge_radial_basis, edge_wa_joint_features, scatter_sum
+from we3nn.utils import edge_radial_basis, edge_wa_joint_features, scatter_sum
 
 
 def test_scatter_sum_matches_manual_and_has_gradients():

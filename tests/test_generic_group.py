@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from e3nn_WE import DirectSumRepresentation, MatrixFiniteGroup
+from we3nn import DirectSumRepresentation, MatrixFiniteGroup
 
 
 def klein_four_group():
@@ -44,7 +44,7 @@ def test_invalid_table_is_rejected():
 
 
 def test_arbitrary_supplied_representations_support_linear_cg_and_tensor_product():
-    from e3nn_WE import clebsch_gordan, nn
+    from we3nn import clebsch_gordan, nn
 
     group = klein_four_group()
     matrices = {

@@ -2,7 +2,7 @@ import pytest
 import torch
 from e3nn import o3
 
-from e3nn_WE import (
+from we3nn import (
     RestrictedSphericalHarmonics,
     gspaces,
     nn,

@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from e3nn import group
+from we3nn import group
 
 
 def timed(function, repeats=30):
