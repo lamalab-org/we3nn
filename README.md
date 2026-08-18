@@ -107,6 +107,13 @@ y_lm = spatial(torch.randn(32, 3))
 angular_small = group.CircularHarmonics(G, max_frequency=3)
 spatial_small = group.RestrictedSphericalHarmonics(G, degrees=[0, 1, 2, 3])
 
+# Project restricted O(3) harmonics to one copy of each finite-group irrep.
+# For C6, degree 3 then has the strict minimum of six coordinates.
+C6 = group.CyclicGroup(6)
+spatial_minimal = group.RestrictedSphericalHarmonics(
+    C6, degrees=3, basis="minimal_finite_irreps"
+)
+
 product = group.nn.FullyConnectedTensorProduct(
     scalars_and_vectors,
     scalars_and_vectors,

@@ -122,3 +122,35 @@ def test_restricted_spherical_harmonics_finite_irrep_basis():
         actual = module(vectors @ embedding.matrix(element).T)
         expected = module.out_type.transform_fibers(output, element)
         torch.testing.assert_close(actual, expected, atol=8e-6, rtol=8e-6)
+
+
+def test_restricted_spherical_harmonics_minimal_c6_irrep_basis():
+    group = cyclic_group(6)
+    module = RestrictedSphericalHarmonics(
+        group,
+        degrees=3,
+        basis="minimal_finite_irreps",
+    )
+    vectors = torch.randn(13, 3, dtype=torch.float64)
+    output = module(vectors)
+
+    assert output.shape == (13, 6)
+    assert module.change_to_output_basis.shape == (6, 7)
+    assert [rep.id for rep in module.out_type] == [(0,), (1,), (2,), (3,)]
+
+    embedding = planar_o3(group)
+    for element in group.elements:
+        actual = module(vectors @ embedding.matrix(element).T)
+        expected = module.out_type.transform_fibers(output, element)
+        torch.testing.assert_close(actual, expected, atol=8e-6, rtol=8e-6)
+
+
+@pytest.mark.parametrize("group", [cyclic_group(5), cyclic_group(6), dihedral_group(6)])
+def test_minimal_finite_irrep_basis_has_no_repeated_irreps(group):
+    module = RestrictedSphericalHarmonics(
+        group,
+        degrees=range(full_harmonic_bandlimit(group) + 1),
+        basis="minimal_finite_irreps",
+    )
+    ids = [rep.id for rep in module.out_type]
+    assert len(ids) == len(set(ids))

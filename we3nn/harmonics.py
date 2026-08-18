@@ -143,6 +143,17 @@ class RestrictedSphericalHarmonics(nn.Module):
     ``z`` fixed. The numerical harmonics are computed by
     :func:`e3nn.o3.spherical_harmonics`; this wrapper supplies their exact
     restricted finite-group representation as module metadata.
+
+    The ``basis`` option controls the returned coordinates:
+
+    * ``"o3"`` keeps e3nn's original spherical-harmonic coordinates;
+    * ``"finite_irreps"`` changes to finite-group irrep coordinates while
+      retaining every multiplicity present in the selected O(3) degrees;
+    * ``"minimal_finite_irreps"`` additionally retains only the first copy
+      of each finite-group irrep. This is an equivariant projection, useful
+      when a harmonic shell contains redundant copies after restriction. For
+      example, the degree-three shell restricted to C6 shrinks from seven to
+      six coordinates: one copy each of frequencies 0, 1, 2, and 3.
     """
 
     def __init__(
@@ -179,15 +190,32 @@ class RestrictedSphericalHarmonics(nn.Module):
         self.normalization = normalization
         self.embedding = embedding or planar_o3(self.group)
         representations = [restrict_o3(o3.Irrep(degree, (-1) ** degree), self.embedding) for degree in self.degrees]
-        if basis not in {"o3", "finite_irreps"}:
-            raise ValueError("basis must be 'o3' or 'finite_irreps'")
+        valid_bases = {"o3", "finite_irreps", "minimal_finite_irreps"}
+        if basis not in valid_bases:
+            raise ValueError(
+                "basis must be 'o3', 'finite_irreps', or 'minimal_finite_irreps'"
+            )
         self.basis = basis
-        if basis == "finite_irreps":
+        if basis in {"finite_irreps", "minimal_finite_irreps"}:
             decompositions = [rep.decompose() for rep in representations]
             finite_reps = [irrep for decomposition in decompositions for irrep in decomposition.irreps]
             change_inv = torch.block_diag(
                 *(torch.linalg.inv(decomposition.change_of_basis) for decomposition in decompositions)
             )
+            if basis == "minimal_finite_irreps":
+                selected_reps = []
+                selected_coordinates = []
+                seen_irrep_ids = set()
+                offset = 0
+                for irrep in finite_reps:
+                    if irrep.id not in seen_irrep_ids:
+                        seen_irrep_ids.add(irrep.id)
+                        selected_reps.append(irrep)
+                        selected_coordinates.extend(range(offset, offset + irrep.size))
+                    offset += irrep.size
+                coordinate_index = torch.tensor(selected_coordinates, dtype=torch.long)
+                change_inv = change_inv.index_select(0, coordinate_index)
+                finite_reps = selected_reps
             self.out_type = FieldType(self.space, finite_reps)
         else:
             change_inv = torch.eye(sum(rep.dim for rep in representations), dtype=torch.float64)
