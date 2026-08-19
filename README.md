@@ -1,7 +1,6 @@
 # we3nn
 
-Validated development base: e3nn `0.6.0` (upstream tag commit
-`2aa7f58440a06b15352a2cbce01fa4c26f824969`) and PyTorch `2.13.0`. The finite
+Validated development base: e3nn `0.6.0` and PyTorch `2.13.0`. The finite
 subsystem is parallel to `e3nn.o3`; it does not modify O(3)'s `Irrep`,
 `Irreps`, or `TensorProduct` behavior.
 
@@ -14,7 +13,7 @@ G = group.DihedralGroup(6)
 layer = group.nn.WELinear(G.standard_representation(), G.regular_representation())
 ```
 
-All finite-group modules continue to accept ordinary `torch.Tensor` objects.
+All finite-group modules accept ordinary `torch.Tensor` objects.
 For runtime representation checks, tensors can optionally be wrapped with
 `RepresentationTensor` or `FieldType.wrap()`. Tensor products warn when raw
 inputs have no metadata and raise an error when wrapped metadata disagrees
@@ -22,14 +21,11 @@ with their declared input representations. Typed inputs propagate typed
 outputs through `WELinear`, `PointActiv`, and tensor products.
 
 The extension applies e3nn's representation approach to the finite planar
-groups C_n (rotations) and D_n (rotations and reflections). `mp_example.py`
-uses `we3nn.group` directly and does not require escnn-style spaces, field
-types. Its raw-tensor calls intentionally use the warning-compatible API.
+groups C_n (rotations) and D_n (rotations and reflections).
 
 The implementation uses real irreducible representations, complete
 intertwiner bases for linear maps, invariant biases, and literal permutation
-regular representations. Applying ReLU, ELU, or another scalar function to a
-regular representation is therefore exactly equivariant.
+regular representations. 
 
 It also supplies the parts of e3nn's representation algebra needed to build
 nonlinear equivariant models:
@@ -128,7 +124,6 @@ To enable representation checking and metadata propagation:
 from we3nn import RepresentationTensor
 
 typed_x = RepresentationTensor(x, scalars_and_vectors)
-# Equivalently: typed_x = group.nn.FieldType(...).wrap(x)
 typed_z = product(typed_x, typed_x)
 assert typed_z.field_type == product.out_type
 z = typed_z.tensor
@@ -155,10 +150,7 @@ kernel_basis = spherical_tp.sample_kernel_basis(edge_vectors)
 ```
 
 The sampled basis has shape
-`(..., weight_numel, output_dim, input_dim)`. It contains the full finite-group
-coupling space, not only paths inherited from the O(3) parent symmetry.
-
-`clebsch_gordan(left, right, output)` returns one normalized tensor for each
+`(..., weight_numel, output_dim, input_dim)`. `clebsch_gordan(left, right, output)` returns one normalized tensor for each
 representation copy, with shape
 `(multiplicity, output_dim, left_dim, right_dim)`.
 `tensor_product_multiplicity(left, right, output)` returns that copy
