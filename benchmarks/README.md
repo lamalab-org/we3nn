@@ -1,7 +1,7 @@
 # D6 message-trunk benchmark
 
-`linear_vs_escnn.py` builds the four-linear, three-ReLU regular-representation
-trunk from `mp_example.py`. It uses a 2048-edge batch, 16 scalar input
+`linear_vs_escnn.py` builds a four-linear, three-ReLU regular-representation
+trunk. It uses a 2048-edge batch, 16 scalar input
 channels, 32 hidden channels, float32 CPU tensors, and one PyTorch thread.
 
 Reference run on Apple Silicon with PyTorch 2.13.0 and escnn 1.0.11:
@@ -28,5 +28,3 @@ and expands directly from the minimal learnable intertwiner coefficients.
 `finite_ops.py` additionally benchmarks construction, forward, and backward
 for 1/4/16 D6 regular-field linear maps plus E1 x E1 and regular x E1 tensor
 products. It also reports learnable parameter counts and tensor storage.
-The same script benchmarks construction, forward, and backward for the full
-D6 message layer (including radial features and both scatter conventions).

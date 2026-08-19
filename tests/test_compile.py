@@ -36,21 +36,3 @@ def test_kernel_tensor_product_compile_smoke_outputs_and_gradients():
     torch.testing.assert_close(actual, eager)
     actual.sum().backward()
     assert left.grad is not None and right.grad is not None and weights.grad is not None
-
-
-@pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")
-def test_d6_message_layer_compile_smoke_outputs_and_gradients():
-    from mp_example import EquivariantMPLayer
-
-    module = EquivariantMPLayer(3, 4, torch.nn.ReLU()).double()
-    compiled = torch.compile(module, backend="eager")
-    h = torch.randn(5, 3, dtype=torch.float64, requires_grad=True)
-    pos = torch.randn(5, 3, dtype=torch.float64, requires_grad=True)
-    anchor = torch.randn(5, 2, dtype=torch.float64, requires_grad=True)
-    edges = torch.tensor([[0, 1, 2, 3, 4], [1, 2, 3, 4, 0]])
-    eager = module(h, pos, anchor, edges)
-    actual = compiled(h, pos, anchor, edges)
-    torch.testing.assert_close(actual[0], eager[0])
-    torch.testing.assert_close(actual[1], eager[1])
-    (actual[0].sum() + actual[1].sum()).backward()
-    assert h.grad is not None and pos.grad is not None and anchor.grad is not None
