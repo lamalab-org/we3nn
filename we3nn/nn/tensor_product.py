@@ -10,6 +10,7 @@ from typing import Iterable
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from ..clebsch_gordan import full_coupling_basis
 from ..representations import Irrep, Representation
@@ -112,6 +113,26 @@ def _cg_chunk_plan(
         unchunked,
         budget,
     )
+
+
+def _shared_cg_chunk(
+    basis: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    coefficients: torch.Tensor,
+) -> torch.Tensor:
+    coupled = torch.einsum("poij,bui,bvj->buvpo", basis, left, right)
+    return torch.einsum("muvp,buvpo->bmo", coefficients, coupled)
+
+
+def _unshared_cg_chunk(
+    basis: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    coefficients: torch.Tensor,
+) -> torch.Tensor:
+    coupled = torch.einsum("poij,bui,bvj->buvpo", basis, left, right)
+    return torch.einsum("bmuvp,buvpo->bmo", coefficients, coupled)
 
 
 @dataclass(frozen=True)
@@ -691,17 +712,13 @@ class _MultiplicityTensorProductBlock(nn.Module):
                     right_stop = min(
                         right_start + plan.right_chunk, right_multiplicity
                     )
-                    coupled = torch.einsum(
-                        "poij,bui,bvj->buvpo",
-                        basis,
-                        left_batch[:, left_start:left_stop],
-                        right_batch[:, right_start:right_stop],
-                    )
+                    selected_left = left_batch[:, left_start:left_stop]
+                    selected_right = right_batch[:, right_start:right_stop]
                     if shared:
                         selected = coefficients_batch[
                             :, left_start:left_stop, right_start:right_stop, :
                         ]
-                        partial = torch.einsum("muvp,buvpo->bmo", selected, coupled)
+                        contraction = _shared_cg_chunk
                     else:
                         selected = coefficients_batch[
                             ...,
@@ -709,7 +726,25 @@ class _MultiplicityTensorProductBlock(nn.Module):
                             right_start:right_stop,
                             :,
                         ]
-                        partial = torch.einsum("bmuvp,buvpo->bmo", selected, coupled)
+                        contraction = _unshared_cg_chunk
+                    checkpointed = torch.is_grad_enabled() and any(
+                        value.requires_grad
+                        for value in (selected_left, selected_right, selected)
+                    )
+                    partial = (
+                        checkpoint(
+                            contraction,
+                            basis,
+                            selected_left,
+                            selected_right,
+                            selected,
+                            use_reentrant=False,
+                        )
+                        if checkpointed
+                        else contraction(
+                            basis, selected_left, selected_right, selected
+                        )
+                    )
                     output_batch = (
                         partial if output_batch is None else output_batch + partial
                     )

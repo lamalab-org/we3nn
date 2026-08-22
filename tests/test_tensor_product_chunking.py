@@ -187,3 +187,23 @@ def test_chunk_planner_bounds_large_edge_and_single_sample_temporaries():
     )
     assert sample_plan.estimated_chunk_bytes <= 1024
     assert sample_plan.left_chunk < 128 or sample_plan.right_chunk < 128
+
+
+def test_chunked_training_does_not_save_coupled_intermediates(monkeypatch):
+    left_type, right_type, output_type = _types("dihedral", 6, "vector_other", 4)
+    product = nn.TensorProduct(left_type, right_type, output_type)
+    left, right = _clone_inputs(left_type, right_type, dtype=torch.float32)
+    monkeypatch.setattr(tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", 64)
+    saved_shapes = []
+
+    def save(tensor):
+        saved_shapes.append(tuple(tensor.shape))
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(save, lambda tensor: tensor):
+        output = product(left, right)
+    # ``coupled`` is five-dimensional [B_chunk,U_chunk,V_chunk,P,O].
+    # Checkpointing retains the chunk inputs/coefficients and recomputes it.
+    assert not any(len(shape) == 5 for shape in saved_shapes)
+    output.square().sum().backward()
+    assert product.blocks[0].weight.grad is not None
