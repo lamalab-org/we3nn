@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 import math
 from typing import Iterable
@@ -56,6 +58,269 @@ def _regular_indices(group) -> torch.Tensor:
         [[index[group.combine(q, a).value] for a in group.elements] for q in group.elements],
         dtype=torch.long,
     )
+
+
+def _contiguous_field_slice(starts: tuple[int, ...], field_size: int) -> slice | None:
+    if all(value == starts[0] + index * field_size for index, value in enumerate(starts)):
+        return slice(starts[0], starts[0] + len(starts) * field_size)
+    return None
+
+
+class _PackedOccurrences:
+    """Pack equal-representation fields with a slice or one indexed gather."""
+
+    def __init__(self, starts: tuple[int, ...], representation: Representation):
+        self.size = representation.size
+        self.multiplicity = len(starts)
+        self.contiguous_slice = _contiguous_field_slice(starts, representation.size)
+        self.indices = torch.tensor(starts)[:, None] + torch.arange(representation.size)[None, :]
+
+    def pack(self, tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        if self.contiguous_slice is not None:
+            value = tensor[..., self.contiguous_slice]
+            return value.reshape(*tensor.shape[:-1], self.multiplicity, self.size)
+        return tensor[..., indices]
+
+
+class _LazyFullyConnectedInstructions(Sequence[TensorProductInstruction]):
+    """Expose legacy logical instructions without allocating them eagerly."""
+
+    def __init__(
+        self,
+        in1_type: FieldType,
+        in2_type: FieldType,
+        out_type: FieldType,
+        length: int,
+    ):
+        self.in1_type = in1_type
+        self.in2_type = in2_type
+        self.out_type = out_type
+        self._length = int(length)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __iter__(self) -> Iterator[TensorProductInstruction]:
+        for i_out, output in enumerate(self.out_type):
+            for i_in1, left in enumerate(self.in1_type):
+                for i_in2, right in enumerate(self.in2_type):
+                    dimension = _coupling_dimension(left, right, output)
+                    if dimension:
+                        regular = output.group.regular_repr
+                        if output is regular:
+                            path_shape = (left.size, right.size)
+                        elif left is regular:
+                            path_shape = (output.size, right.size)
+                        elif right is regular:
+                            path_shape = (output.size, left.size)
+                        else:
+                            path_shape = (dimension,)
+                        yield TensorProductInstruction(
+                            i_in1, i_in2, i_out, path_shape=path_shape
+                        )
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return tuple(self)[index]
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        for current, instruction in enumerate(self):
+            if current == index:
+                return instruction
+        raise IndexError(index)
+
+
+class _MultiplicityTensorProductBlock(nn.Module):
+    """One representation-theoretic coupling with explicit multiplicity axes."""
+
+    def __init__(
+        self,
+        left: Representation,
+        right: Representation,
+        output: Representation,
+        left_starts: tuple[int, ...],
+        right_starts: tuple[int, ...],
+        output_starts: tuple[int, ...],
+        *,
+        internal_weights: bool,
+        legacy_weight_indices: torch.Tensor,
+    ):
+        super().__init__()
+        self.left = left
+        self.right = right
+        self.output = output
+        self.group = output.group
+        self.left_pack = _PackedOccurrences(left_starts, left)
+        self.right_pack = _PackedOccurrences(right_starts, right)
+        self.output_pack = _PackedOccurrences(output_starts, output)
+        self.register_buffer("left_indices", self.left_pack.indices, persistent=False)
+        self.register_buffer("right_indices", self.right_pack.indices, persistent=False)
+        self.register_buffer("output_indices", self.output_pack.indices, persistent=False)
+
+        regular = self.group.regular_repr
+        if output is regular:
+            self.kind = "output_regular"
+            coupling_shape = (left.size, right.size)
+        elif left is regular:
+            self.kind = "left_regular"
+            coupling_shape = (output.size, right.size)
+        elif right is regular:
+            self.kind = "right_regular"
+            coupling_shape = (output.size, left.size)
+        else:
+            self.kind = "cg"
+            coupling_basis = _generic_couplings(left, right, output)
+            coupling_shape = (coupling_basis.shape[0],)
+
+        self.multiplicity_shape = (
+            self.output_pack.multiplicity,
+            self.left_pack.multiplicity,
+            self.right_pack.multiplicity,
+        )
+        self.coupling_shape = tuple(coupling_shape)
+        self.weight_shape = (*self.multiplicity_shape, *self.coupling_shape)
+        self.weight_numel = math.prod(self.weight_shape)
+        if internal_weights:
+            self.weight = nn.Parameter(torch.empty(self.weight_shape))
+        else:
+            self.register_parameter("weight", None)
+
+        if self.kind == "cg":
+            self.register_buffer("coupling_basis", coupling_basis, persistent=True)
+        else:
+            self.register_buffer("coupling_basis", torch.empty(0, dtype=torch.float64), persistent=False)
+        need_left = self.kind in {"output_regular", "right_regular"} and left is not regular
+        need_right = self.kind in {"output_regular", "left_regular"} and right is not regular
+        need_output = self.kind in {"left_regular", "right_regular"}
+        stack = lambda rep, needed: (
+            torch.stack([rep(element) for element in self.group.elements])
+            if needed else torch.empty(0, dtype=torch.float64)
+        )
+        self.register_buffer("left_matrices", stack(left, need_left), persistent=False)
+        self.register_buffer("right_matrices", stack(right, need_right), persistent=False)
+        self.register_buffer("output_matrices", stack(output, need_output), persistent=False)
+        need_indices = self.kind != "cg" and (
+            (self.kind == "output_regular" and (left is regular or right is regular))
+            or (self.kind == "left_regular" and right is regular)
+            or (self.kind == "right_regular" and left is regular)
+        )
+        self.register_buffer(
+            "regular_indices",
+            _regular_indices(self.group) if need_indices else torch.empty(0, dtype=torch.long),
+            persistent=False,
+        )
+
+        flat_indices = legacy_weight_indices.reshape(-1)
+        if flat_indices.numel() and torch.equal(
+            flat_indices,
+            torch.arange(flat_indices[0], flat_indices[0] + flat_indices.numel()),
+        ):
+            self.legacy_weight_slice = slice(int(flat_indices[0]), int(flat_indices[-1]) + 1)
+            self.register_buffer("legacy_weight_indices", torch.empty(0, dtype=torch.long), persistent=False)
+        else:
+            self.legacy_weight_slice = None
+            self.register_buffer("legacy_weight_indices", flat_indices, persistent=False)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        if self.weight is not None:
+            bound = math.sqrt(6.0 / (self.left.size + self.right.size + self.output.size))
+            nn.init.uniform_(self.weight, -bound, bound)
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        reference = self.weight if self.weight is not None else self.coupling_basis
+        device, dtype = reference.device, reference.dtype
+        for name, rep in (
+            ("left_matrices", self.left),
+            ("right_matrices", self.right),
+            ("output_matrices", self.output),
+        ):
+            if getattr(self, name).numel():
+                setattr(
+                    self,
+                    name,
+                    torch.stack([rep(g) for g in self.group.elements]).to(device=device, dtype=dtype),
+                )
+        if self.kind == "cg":
+            self.coupling_basis = _generic_couplings(self.left, self.right, self.output).to(
+                device=device, dtype=dtype
+            )
+        return self
+
+    def pack_left(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self.left_pack.pack(tensor, self.left_indices)
+
+    def pack_right(self, tensor: torch.Tensor) -> torch.Tensor:
+        return self.right_pack.pack(tensor, self.right_indices)
+
+    def external_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if self.legacy_weight_slice is not None:
+            selected = weight[..., self.legacy_weight_slice]
+        else:
+            selected = weight[..., self.legacy_weight_indices]
+        return selected.reshape(*weight.shape[:-1], *self.weight_shape)
+
+    def _matrices(self, name: str, reference: torch.Tensor) -> torch.Tensor:
+        return getattr(self, name).to(device=reference.device, dtype=reference.dtype)
+
+    def _inverse_transforms(
+        self, value: torch.Tensor, representation: Representation, matrices_name: str
+    ) -> torch.Tensor:
+        if representation is self.group.regular_repr:
+            return value[..., self.regular_indices]
+        matrices = self._matrices(matrices_name, value)
+        return torch.einsum("...ui,qia->...uqa", value, matrices)
+
+    def forward(
+        self, left: torch.Tensor, right: torch.Tensor, weight: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        left = self.pack_left(left)
+        right = self.pack_right(right)
+        coefficients = self.weight if weight is None else weight
+        if coefficients is None:
+            raise RuntimeError("external tensor-product weights were not supplied")
+        shared = coefficients.ndim == len(self.weight_shape)
+
+        if self.kind == "cg":
+            basis = self.coupling_basis.to(device=left.device, dtype=left.dtype)
+            coupled = torch.einsum("poij,...ui,...vj->...uvpo", basis, left, right)
+            equation = "muvp,...uvpo->...mo" if shared else "...muvp,...uvpo->...mo"
+            return torch.einsum(equation, coefficients, coupled)
+
+        order_scale = math.sqrt(self.group.order())
+        if self.kind == "output_regular":
+            left_transformed = self._inverse_transforms(left, self.left, "left_matrices")
+            right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
+            equation = (
+                "muvab,...uqa,...vqb->...mq"
+                if shared else "...muvab,...uqa,...vqb->...mq"
+            )
+            return torch.einsum(equation, coefficients, left_transformed, right_transformed) / order_scale
+
+        output_matrices = self._matrices("output_matrices", left)
+        if self.kind == "left_regular":
+            right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
+            equation = (
+                "muvab,...vqb,...uq->...mqa"
+                if shared else "...muvab,...vqb,...uq->...mqa"
+            )
+            intermediate = torch.einsum(equation, coefficients, right_transformed, left)
+        else:
+            left_transformed = self._inverse_transforms(left, self.left, "left_matrices")
+            equation = (
+                "muvab,...uqb,...vq->...mqa"
+                if shared else "...muvab,...uqb,...vq->...mqa"
+            )
+            intermediate = torch.einsum(equation, coefficients, left_transformed, right)
+        return torch.einsum("qoa,...mqa->...mo", output_matrices, intermediate) / order_scale
+
+    def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+        flat_indices = self.output_indices.reshape(-1)
+        flat_value = value.reshape(*value.shape[:-2], -1)
+        return output.index_add(-1, flat_indices, flat_value)
 
 
 class _TensorProductPath(nn.Module):
@@ -300,34 +565,123 @@ class TensorProduct(nn.Module):
         self.internal_weights = bool(internal_weights)
         self.shared_weights = bool(shared_weights)
 
-        requested = []
         if instructions is None:
-            for i_out, output in enumerate(out_type):
-                for i_in1, left in enumerate(in1_type):
-                    for i_in2, right in enumerate(in2_type):
+            def occurrences(field_type):
+                grouped = defaultdict(lambda: ([], []))
+                for field_index, (representation, start) in enumerate(
+                    zip(field_type, field_type.fields_start)
+                ):
+                    grouped[representation][0].append(field_index)
+                    grouped[representation][1].append(start)
+                return {
+                    representation: (tuple(indices), tuple(starts))
+                    for representation, (indices, starts) in grouped.items()
+                }
+
+            left_occurrences = occurrences(in1_type)
+            right_occurrences = occurrences(in2_type)
+            output_occurrences = occurrences(out_type)
+            dimensions = torch.zeros(
+                len(out_type), len(in1_type), len(in2_type), dtype=torch.long
+            )
+            block_specs = []
+            for output, (output_fields, output_starts) in output_occurrences.items():
+                output_index = torch.tensor(output_fields)
+                for left, (left_fields, left_starts) in left_occurrences.items():
+                    left_index = torch.tensor(left_fields)
+                    for right, (right_fields, right_starts) in right_occurrences.items():
                         dimension = _coupling_dimension(left, right, output)
-                        if dimension:
-                            requested.append((i_in1, i_in2, i_out, None, "uvw", True, 1.0))
-        else:
-            for instruction in instructions:
-                if isinstance(instruction, TensorProductInstruction):
-                    if instruction.connection_mode != "uvw":
-                        raise ValueError("only connection_mode='uvw' is currently supported")
-                    requested.append(
-                        (
-                            instruction.i_in1,
-                            instruction.i_in2,
-                            instruction.i_out,
-                            instruction.coupling,
-                            instruction.connection_mode,
-                            instruction.has_weight,
-                            instruction.path_weight,
+                        if not dimension:
+                            continue
+                        right_index = torch.tensor(right_fields)
+                        dimensions[
+                            output_index[:, None, None],
+                            left_index[None, :, None],
+                            right_index[None, None, :],
+                        ] = dimension
+                        block_specs.append(
+                            (
+                                left,
+                                right,
+                                output,
+                                left_fields,
+                                left_starts,
+                                right_fields,
+                                right_starts,
+                                output_fields,
+                                output_starts,
+                                dimension,
+                            )
                         )
+
+            flat_dimensions = dimensions.reshape(-1)
+            flat_offsets = torch.cumsum(flat_dimensions, dim=0) - flat_dimensions
+            blocks = []
+            for (
+                left,
+                right,
+                output,
+                left_fields,
+                left_starts,
+                right_fields,
+                right_starts,
+                output_fields,
+                output_starts,
+                dimension,
+            ) in block_specs:
+                output_index, left_index, right_index = torch.meshgrid(
+                    torch.tensor(output_fields),
+                    torch.tensor(left_fields),
+                    torch.tensor(right_fields),
+                    indexing="ij",
+                )
+                flat_triples = (
+                    (output_index * len(in1_type) + left_index) * len(in2_type)
+                    + right_index
+                )
+                legacy_indices = flat_offsets[flat_triples][..., None] + torch.arange(dimension)
+                blocks.append(
+                    _MultiplicityTensorProductBlock(
+                        left,
+                        right,
+                        output,
+                        left_starts,
+                        right_starts,
+                        output_starts,
+                        internal_weights=internal_weights,
+                        legacy_weight_indices=legacy_indices,
                     )
-                else:
-                    if len(instruction) != 3:
-                        raise ValueError("instructions must be (i_in1, i_in2, i_out) triples")
-                    requested.append((*map(int, instruction), None, "uvw", True, 1.0))
+                )
+            self.blocks = nn.ModuleList(blocks)
+            self.paths = nn.ModuleList()
+            logical_paths = int((dimensions > 0).sum())
+            self.instructions = _LazyFullyConnectedInstructions(
+                in1_type, in2_type, out_type, logical_paths
+            )
+            self.weight_numel = int(dimensions.sum())
+            self._grouped = True
+            return
+
+        requested = []
+        for instruction in instructions:
+            if isinstance(instruction, TensorProductInstruction):
+                if instruction.connection_mode != "uvw":
+                    raise ValueError("only connection_mode='uvw' is currently supported")
+                requested.append(
+                    (
+                        instruction.i_in1,
+                        instruction.i_in2,
+                        instruction.i_out,
+                        instruction.coupling,
+                        instruction.connection_mode,
+                        instruction.has_weight,
+                        instruction.path_weight,
+                    )
+                )
+            else:
+                if len(instruction) != 3:
+                    raise ValueError("instructions must be (i_in1, i_in2, i_out) triples")
+                requested.append((*map(int, instruction), None, "uvw", True, 1.0))
 
         paths = []
         normalized_instructions = []
@@ -356,8 +710,10 @@ class TensorProduct(nn.Module):
                 )
             )
         self.paths = nn.ModuleList(paths)
+        self.blocks = nn.ModuleList()
         self.instructions = tuple(normalized_instructions)
         self.weight_numel = sum(path.weight_numel for path in self.paths)
+        self._grouped = False
 
     def forward(
         self,
@@ -387,6 +743,14 @@ class TensorProduct(nn.Module):
                 raise ValueError(f"external weight must have shape {expected}")
 
         output = input1.new_zeros(*input1.shape[:-1], self.out_type.size)
+        if self._grouped:
+            for block in self.blocks:
+                external = None
+                if not self.internal_weights:
+                    external = block.external_weight(weight)
+                output = block.add_to_output(output, block(input1, input2, external))
+            return wrap_if_typed(output, self.out_type, typed)
+
         weight_offset = 0
         for instruction, path in zip(self.instructions, self.paths):
             left = input1[..., self.in1_type.fields_start[instruction.i_in1]:self.in1_type.fields_end[instruction.i_in1]]
