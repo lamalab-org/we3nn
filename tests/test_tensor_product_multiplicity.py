@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 import torch
 
@@ -17,7 +19,10 @@ def _legacy_from(grouped):
 
 
 @pytest.mark.parametrize("kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)])
-def test_grouped_default_matches_legacy_paths_outputs_and_gradients(kind, n):
+@pytest.mark.parametrize("shared_weights", [True, False])
+def test_grouped_default_matches_legacy_paths_outputs_and_gradients(
+    kind, n, shared_weights
+):
     base = gspaces.rot2dOnR2(n) if kind == "cyclic" else gspaces.flipRot2dOnR2(n)
     space = gspaces.no_base_space(base.fibergroup)
     scalar = space.trivial_repr
@@ -28,14 +33,20 @@ def test_grouped_default_matches_legacy_paths_outputs_and_gradients(kind, n):
     right = nn.FieldType(space, [scalar, vector, other, vector])
     output = nn.FieldType(space, [other, scalar, vector, other])
     grouped = nn.TensorProduct(
-        left, right, output, internal_weights=False, shared_weights=False
+        left,
+        right,
+        output,
+        internal_weights=False,
+        shared_weights=shared_weights,
     ).double()
     legacy = _legacy_from(grouped)
     assert grouped.weight_numel == legacy.weight_numel
+    assert len(grouped.instructions) == len(legacy.instructions)
 
     left_new = torch.randn(2, left.size, dtype=torch.float64, requires_grad=True)
     right_new = torch.randn(2, right.size, dtype=torch.float64, requires_grad=True)
-    weight_new = torch.randn(2, grouped.weight_numel, dtype=torch.float64, requires_grad=True)
+    weight_shape = (grouped.weight_numel,) if shared_weights else (2, grouped.weight_numel)
+    weight_new = torch.randn(*weight_shape, dtype=torch.float64, requires_grad=True)
     left_old = left_new.detach().clone().requires_grad_()
     right_old = right_new.detach().clone().requires_grad_()
     weight_old = weight_new.detach().clone().requires_grad_()
@@ -88,6 +99,11 @@ def test_homogeneous_multiplicity_is_one_execution_block():
         for name, buffer in product.named_buffers()
         if name.endswith("coupling_basis")
     ) == 1
+    assert all(
+        buffer.numel() == 0
+        for name, buffer in product.named_buffers()
+        if "legacy_" in name
+    )
     x = torch.randn(2, left.size, requires_grad=True)
     y = torch.randn(2, right.size, requires_grad=True)
     product(x, y).square().mean().backward()
@@ -136,3 +152,50 @@ def test_legacy_internal_path_checkpoint_loads_into_grouped_blocks():
     x = torch.randn(3, left.size, dtype=torch.float64)
     y = torch.randn(3, right.size, dtype=torch.float64)
     torch.testing.assert_close(grouped(x, y), legacy(x, y), atol=2e-12, rtol=2e-12)
+
+
+def test_modern_internal_checkpoint_does_not_generate_legacy_layout(monkeypatch):
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    scalar, e1, e2 = space.trivial_repr, space.irrep(1, 1), space.irrep(1, 2)
+    left = nn.FieldType(space, [e1, scalar, e1])
+    right = nn.FieldType(space, [e2, e1])
+    output = nn.FieldType(space, [scalar, e2, scalar])
+    source = nn.TensorProduct(left, right, output).double()
+    target = nn.TensorProduct(left, right, output).double()
+    tensor_product_module = importlib.import_module("we3nn.nn.tensor_product")
+
+    def unexpected_legacy_layout(*args, **kwargs):
+        raise AssertionError("modern checkpoint loading generated legacy layout metadata")
+
+    monkeypatch.setattr(
+        tensor_product_module, "_legacy_weight_prefixes", unexpected_legacy_layout
+    )
+    target.load_state_dict(source.state_dict())
+    for source_block, target_block in zip(source.blocks, target.blocks):
+        torch.testing.assert_close(source_block.weight, target_block.weight)
+
+
+@pytest.mark.parametrize("multiplicity", [128, 256, 512])
+def test_large_external_construction_has_no_cubic_tensor_metadata(multiplicity):
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    e1, e2 = space.irrep(1, 1), space.irrep(1, 2)
+    product = nn.TensorProduct(
+        nn.FieldType(space, [e1] * multiplicity),
+        nn.FieldType(space, [e1] * multiplicity),
+        nn.FieldType(space, [e2] * multiplicity),
+        internal_weights=False,
+    )
+    coupling_count = full_coupling_basis(e1, e1, e2).shape[0]
+    assert len(product.blocks) == 1
+    assert len(product.paths) == 0
+    assert len(product.instructions) == multiplicity**3
+    assert product.weight_numel == multiplicity**3 * coupling_count
+    assert sum(parameter.numel() for parameter in product.parameters()) == 0
+    # A homogeneous layout is a single legacy slice and contiguous field slices.
+    # Its buffers contain only representation-theoretic data, independent of m^3.
+    assert all(
+        buffer.numel() == 0
+        for name, buffer in product.named_buffers()
+        if "legacy_" in name or name.endswith("_indices")
+    )
+    assert sum(buffer.numel() for buffer in product.buffers()) < 10 * multiplicity
