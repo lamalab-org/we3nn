@@ -139,6 +139,38 @@ def _legacy_weight_prefixes(
     )
 
 
+def _contiguous_legacy_weight_slice(
+    output_offsets: torch.Tensor,
+    left_offsets: torch.Tensor,
+    right_offsets: torch.Tensor,
+    coupling_numel: int,
+) -> slice | None:
+    """Recognize a contiguous separable legacy layout without expanding it."""
+    coupling_numel = int(coupling_numel)
+    if right_offsets.numel() > 1 and not torch.all(
+        torch.diff(right_offsets) == coupling_numel
+    ):
+        return None
+    right_span = int(right_offsets[-1] - right_offsets[0])
+    if left_offsets.numel() > 1 and not torch.all(
+        torch.diff(left_offsets) == right_span + coupling_numel
+    ):
+        return None
+    left_span = int(left_offsets[-1] - left_offsets[0])
+    if output_offsets.numel() > 1 and not torch.all(
+        torch.diff(output_offsets) == left_span + right_span + coupling_numel
+    ):
+        return None
+    start = int(output_offsets[0] + left_offsets[0] + right_offsets[0])
+    stop = start + (
+        output_offsets.numel()
+        * left_offsets.numel()
+        * right_offsets.numel()
+        * coupling_numel
+    )
+    return slice(start, stop)
+
+
 class _PackedOccurrences:
     """Pack equal-representation fields with a slice or one indexed gather."""
 
@@ -216,15 +248,21 @@ class _MultiplicityTensorProductBlock(nn.Module):
         left_starts: tuple[int, ...],
         right_starts: tuple[int, ...],
         output_starts: tuple[int, ...],
+        left_fields: tuple[int, ...],
+        right_fields: tuple[int, ...],
+        output_fields: tuple[int, ...],
         *,
         internal_weights: bool,
-        legacy_weight_indices: torch.Tensor,
+        legacy_weight_offsets: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
     ):
         super().__init__()
         self.left = left
         self.right = right
         self.output = output
         self.group = output.group
+        self.left_fields = left_fields
+        self.right_fields = right_fields
+        self.output_fields = output_fields
         self.left_pack = _PackedOccurrences(left_starts, left)
         self.right_pack = _PackedOccurrences(right_starts, right)
         self.output_pack = _PackedOccurrences(output_starts, output)
@@ -285,16 +323,23 @@ class _MultiplicityTensorProductBlock(nn.Module):
             persistent=False,
         )
 
-        flat_indices = legacy_weight_indices.reshape(-1)
-        if flat_indices.numel() and torch.equal(
-            flat_indices,
-            torch.arange(flat_indices[0], flat_indices[0] + flat_indices.numel()),
-        ):
-            self.legacy_weight_slice = slice(int(flat_indices[0]), int(flat_indices[-1]) + 1)
-            self.register_buffer("legacy_weight_indices", torch.empty(0, dtype=torch.long), persistent=False)
-        else:
+        empty = torch.empty(0, dtype=torch.long)
+        if legacy_weight_offsets is None:
             self.legacy_weight_slice = None
-            self.register_buffer("legacy_weight_indices", flat_indices, persistent=False)
+            output_offsets = left_offsets = right_offsets = empty
+        else:
+            output_offsets, left_offsets, right_offsets = legacy_weight_offsets
+            self.legacy_weight_slice = _contiguous_legacy_weight_slice(
+                output_offsets,
+                left_offsets,
+                right_offsets,
+                math.prod(self.coupling_shape),
+            )
+            if self.legacy_weight_slice is not None:
+                output_offsets = left_offsets = right_offsets = empty
+        self.register_buffer("legacy_output_offsets", output_offsets, persistent=False)
+        self.register_buffer("legacy_left_offsets", left_offsets, persistent=False)
+        self.register_buffer("legacy_right_offsets", right_offsets, persistent=False)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -330,11 +375,59 @@ class _MultiplicityTensorProductBlock(nn.Module):
         return self.right_pack.pack(tensor, self.right_indices)
 
     def external_weight(self, weight: torch.Tensor) -> torch.Tensor:
-        if self.legacy_weight_slice is not None:
-            selected = weight[..., self.legacy_weight_slice]
-        else:
-            selected = weight[..., self.legacy_weight_indices]
+        selected = self._select_legacy_weight(weight)
         return selected.reshape(*weight.shape[:-1], *self.weight_shape)
+
+    def _legacy_index_chunks(
+        self,
+        device: torch.device,
+        offsets: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        *,
+        max_indices: int = 1 << 20,
+    ) -> Iterator[torch.Tensor]:
+        """Yield bounded flattened legacy indices in grouped tensor order."""
+        if offsets is None:
+            offsets = (
+                self.legacy_output_offsets,
+                self.legacy_left_offsets,
+                self.legacy_right_offsets,
+            )
+        output_offsets, left_offsets, right_offsets = (
+            value.to(device=device) for value in offsets
+        )
+        coupling_numel = math.prod(self.coupling_shape)
+        per_output = max(1, left_offsets.numel() * right_offsets.numel() * coupling_numel)
+        chunk_size = max(1, max_indices // per_output)
+        coupling = torch.arange(coupling_numel, device=device)
+        for start in range(0, output_offsets.numel(), chunk_size):
+            indices = (
+                output_offsets[start : start + chunk_size, None, None, None]
+                + left_offsets[None, :, None, None]
+                + right_offsets[None, None, :, None]
+                + coupling[None, None, None, :]
+            )
+            yield indices.reshape(-1)
+
+    def _select_legacy_weight(
+        self,
+        weight: torch.Tensor,
+        offsets: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        if self.legacy_weight_slice is not None:
+            return weight[..., self.legacy_weight_slice]
+        chunks = [weight[..., indices] for indices in self._legacy_index_chunks(weight.device, offsets)]
+        return chunks[0] if len(chunks) == 1 else torch.cat(chunks, dim=-1)
+
+    def legacy_weight_indices(self, device: torch.device) -> torch.Tensor:
+        """Materialize legacy indices only when a sampled kernel requires them."""
+        if self.legacy_weight_slice is not None:
+            return torch.arange(
+                self.legacy_weight_slice.start,
+                self.legacy_weight_slice.stop,
+                device=device,
+            )
+        chunks = tuple(self._legacy_index_chunks(device))
+        return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
 
     def _matrices(self, name: str, reference: torch.Tensor) -> torch.Tensor:
         return getattr(self, name).to(device=reference.device, dtype=reference.dtype)
@@ -454,14 +547,7 @@ class _MultiplicityTensorProductBlock(nn.Module):
             self.output.size * self.left.size,
         )
 
-        if self.legacy_weight_slice is not None:
-            weight_indices = torch.arange(
-                self.legacy_weight_slice.start,
-                self.legacy_weight_slice.stop,
-                device=right.device,
-            )
-        else:
-            weight_indices = self.legacy_weight_indices.to(device=right.device)
+        weight_indices = self.legacy_weight_indices(right.device)
 
         output_coordinates = self.output_indices.to(device=right.device)
         input_coordinates = self.left_indices.to(device=right.device)
@@ -772,9 +858,11 @@ class TensorProduct(nn.Module):
                             )
                         )
 
-            output_prefix, left_prefixes, right_prefixes = _legacy_weight_prefixes(
-                in1_type, in2_type, out_type, coupling_dimensions
-            )
+            legacy_prefixes = None
+            if not internal_weights:
+                legacy_prefixes = _legacy_weight_prefixes(
+                    in1_type, in2_type, out_type, coupling_dimensions
+                )
             blocks = []
             weight_numel = 0
             logical_paths = 0
@@ -790,15 +878,14 @@ class TensorProduct(nn.Module):
                 output_starts,
                 dimension,
             ) in block_specs:
-                output_offsets = output_prefix[torch.tensor(output_fields)]
-                left_offsets = left_prefixes[output][torch.tensor(left_fields)]
-                right_offsets = right_prefixes[(output, left)][torch.tensor(right_fields)]
-                legacy_indices = (
-                    output_offsets[:, None, None, None]
-                    + left_offsets[None, :, None, None]
-                    + right_offsets[None, None, :, None]
-                    + torch.arange(dimension)[None, None, None, :]
-                )
+                legacy_offsets = None
+                if legacy_prefixes is not None:
+                    output_prefix, left_prefixes, right_prefixes = legacy_prefixes
+                    legacy_offsets = (
+                        output_prefix[torch.tensor(output_fields)],
+                        left_prefixes[output][torch.tensor(left_fields)],
+                        right_prefixes[(output, left)][torch.tensor(right_fields)],
+                    )
                 blocks.append(
                     _MultiplicityTensorProductBlock(
                         left,
@@ -807,8 +894,11 @@ class TensorProduct(nn.Module):
                         left_starts,
                         right_starts,
                         output_starts,
+                        left_fields,
+                        right_fields,
+                        output_fields,
                         internal_weights=internal_weights,
-                        legacy_weight_indices=legacy_indices,
+                        legacy_weight_offsets=legacy_offsets,
                     )
                 )
                 multiplicity_paths = (
@@ -822,6 +912,7 @@ class TensorProduct(nn.Module):
                 in1_type, in2_type, out_type, logical_paths
             )
             self.weight_numel = weight_numel
+            self._coupling_dimensions = coupling_dimensions
             self._grouped = True
             return
 
@@ -953,12 +1044,27 @@ class TensorProduct(nn.Module):
                     legacy_weights.append(state_dict[key].reshape(-1))
                     path_index += 1
                 flat_weights = torch.cat(legacy_weights) if legacy_weights else None
+                legacy_prefixes = None
+                if flat_weights is not None and any(
+                    block.weight is not None for block in self.blocks
+                ):
+                    legacy_prefixes = _legacy_weight_prefixes(
+                        self.in1_type,
+                        self.in2_type,
+                        self.out_type,
+                        self._coupling_dimensions,
+                    )
                 for block_index, block in enumerate(self.blocks):
                     if block.weight is not None and flat_weights is not None:
-                        if block.legacy_weight_slice is not None:
-                            selected = flat_weights[block.legacy_weight_slice]
-                        else:
-                            selected = flat_weights[block.legacy_weight_indices]
+                        output_prefix, left_prefixes, right_prefixes = legacy_prefixes
+                        offsets = (
+                            output_prefix[torch.tensor(block.output_fields)],
+                            left_prefixes[block.output][torch.tensor(block.left_fields)],
+                            right_prefixes[(block.output, block.left)][
+                                torch.tensor(block.right_fields)
+                            ],
+                        )
+                        selected = block._select_legacy_weight(flat_weights, offsets)
                         state_dict[f"{prefix}blocks.{block_index}.weight"] = selected.reshape(
                             block.weight_shape
                         )
