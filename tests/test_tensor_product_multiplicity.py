@@ -175,6 +175,29 @@ def test_modern_internal_checkpoint_does_not_generate_legacy_layout(monkeypatch)
         torch.testing.assert_close(source_block.weight, target_block.weight)
 
 
+def test_irregular_external_legacy_indices_are_bounded_and_ordered():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    scalar, e1, e2 = space.trivial_repr, space.irrep(1, 1), space.irrep(1, 2)
+    product = nn.TensorProduct(
+        nn.FieldType(space, [e1, scalar, e1]),
+        nn.FieldType(space, [e2, scalar, e2]),
+        nn.FieldType(space, [scalar, e1, scalar]),
+        internal_weights=False,
+    )
+    irregular_blocks = 0
+    for block in product.blocks:
+        if block.legacy_weight_slice is not None:
+            continue
+        irregular_blocks += 1
+        expected = block.legacy_weight_indices(torch.device("cpu"))
+        chunks = tuple(
+            block._legacy_index_chunks(torch.device("cpu"), max_indices=3)
+        )
+        assert all(chunk.numel() <= 3 for chunk in chunks)
+        torch.testing.assert_close(torch.cat(chunks), expected)
+    assert irregular_blocks > 0
+
+
 @pytest.mark.parametrize("multiplicity", [128, 256, 512])
 def test_large_external_construction_has_no_cubic_tensor_metadata(multiplicity):
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)

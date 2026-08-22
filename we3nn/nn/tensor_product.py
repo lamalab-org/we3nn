@@ -410,17 +410,28 @@ class _MultiplicityTensorProductBlock(nn.Module):
             value.to(device=device) for value in offsets
         )
         coupling_numel = math.prod(self.coupling_shape)
-        per_output = max(1, left_offsets.numel() * right_offsets.numel() * coupling_numel)
-        chunk_size = max(1, max_indices // per_output)
-        coupling = torch.arange(coupling_numel, device=device)
-        for start in range(0, output_offsets.numel(), chunk_size):
-            indices = (
-                output_offsets[start : start + chunk_size, None, None, None]
-                + left_offsets[None, :, None, None]
-                + right_offsets[None, None, :, None]
-                + coupling[None, None, None, :]
+        left_multiplicity = left_offsets.numel()
+        right_multiplicity = right_offsets.numel()
+        total = (
+            output_offsets.numel()
+            * left_multiplicity
+            * right_multiplicity
+            * coupling_numel
+        )
+        for start in range(0, total, max_indices):
+            linear = torch.arange(start, min(start + max_indices, total), device=device)
+            coupling = linear.remainder(coupling_numel)
+            fields = torch.div(linear, coupling_numel, rounding_mode="floor")
+            right_index = fields.remainder(right_multiplicity)
+            fields = torch.div(fields, right_multiplicity, rounding_mode="floor")
+            left_index = fields.remainder(left_multiplicity)
+            output_index = torch.div(fields, left_multiplicity, rounding_mode="floor")
+            yield (
+                output_offsets[output_index]
+                + left_offsets[left_index]
+                + right_offsets[right_index]
+                + coupling
             )
-            yield indices.reshape(-1)
 
     def _select_legacy_weight(
         self,
