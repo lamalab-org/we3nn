@@ -66,6 +66,79 @@ def _contiguous_field_slice(starts: tuple[int, ...], field_size: int) -> slice |
     return None
 
 
+def _representation_occurrences(
+    field_type: FieldType,
+) -> dict[Representation, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Group field indices and coordinate starts by representation identity."""
+    grouped = defaultdict(lambda: ([], []))
+    for field_index, (representation, start) in enumerate(
+        zip(field_type, field_type.fields_start)
+    ):
+        grouped[representation][0].append(field_index)
+        grouped[representation][1].append(start)
+    return {
+        representation: (tuple(indices), tuple(starts))
+        for representation, (indices, starts) in grouped.items()
+    }
+
+
+def _legacy_weight_prefixes(
+    in1_type: FieldType,
+    in2_type: FieldType,
+    out_type: FieldType,
+    dimensions: dict[tuple[Representation, Representation, Representation], int],
+) -> tuple[
+    torch.Tensor,
+    dict[Representation, torch.Tensor],
+    dict[tuple[Representation, Representation], torch.Tensor],
+]:
+    """Build separable prefixes for output-left-right-coupling weight order."""
+    right_counts: dict[Representation, int] = defaultdict(int)
+    for right in in2_type:
+        right_counts[right] += 1
+
+    output_totals = {
+        output: sum(
+            right_counts[right] * dimensions.get((output, left, right), 0)
+            for left in in1_type
+            for right in right_counts
+        )
+        for output in set(out_type)
+    }
+    output_prefix = []
+    offset = 0
+    for output in out_type:
+        output_prefix.append(offset)
+        offset += output_totals[output]
+
+    left_prefixes = {}
+    right_prefixes = {}
+    for output in set(out_type):
+        prefix = []
+        offset = 0
+        for left in in1_type:
+            prefix.append(offset)
+            offset += sum(
+                count * dimensions.get((output, left, right), 0)
+                for right, count in right_counts.items()
+            )
+        left_prefixes[output] = torch.tensor(prefix, dtype=torch.long)
+
+        for left in set(in1_type):
+            prefix = []
+            offset = 0
+            for right in in2_type:
+                prefix.append(offset)
+                offset += dimensions.get((output, left, right), 0)
+            right_prefixes[(output, left)] = torch.tensor(prefix, dtype=torch.long)
+
+    return (
+        torch.tensor(output_prefix, dtype=torch.long),
+        left_prefixes,
+        right_prefixes,
+    )
+
+
 class _PackedOccurrences:
     """Pack equal-representation fields with a slice or one indexed gather."""
 
@@ -672,39 +745,18 @@ class TensorProduct(nn.Module):
         self.shared_weights = bool(shared_weights)
 
         if instructions is None:
-            def occurrences(field_type):
-                grouped = defaultdict(lambda: ([], []))
-                for field_index, (representation, start) in enumerate(
-                    zip(field_type, field_type.fields_start)
-                ):
-                    grouped[representation][0].append(field_index)
-                    grouped[representation][1].append(start)
-                return {
-                    representation: (tuple(indices), tuple(starts))
-                    for representation, (indices, starts) in grouped.items()
-                }
-
-            left_occurrences = occurrences(in1_type)
-            right_occurrences = occurrences(in2_type)
-            output_occurrences = occurrences(out_type)
-            dimensions = torch.zeros(
-                len(out_type), len(in1_type), len(in2_type), dtype=torch.long
-            )
+            left_occurrences = _representation_occurrences(in1_type)
+            right_occurrences = _representation_occurrences(in2_type)
+            output_occurrences = _representation_occurrences(out_type)
+            coupling_dimensions = {}
             block_specs = []
             for output, (output_fields, output_starts) in output_occurrences.items():
-                output_index = torch.tensor(output_fields)
                 for left, (left_fields, left_starts) in left_occurrences.items():
-                    left_index = torch.tensor(left_fields)
                     for right, (right_fields, right_starts) in right_occurrences.items():
                         dimension = _coupling_dimension(left, right, output)
+                        coupling_dimensions[(output, left, right)] = dimension
                         if not dimension:
                             continue
-                        right_index = torch.tensor(right_fields)
-                        dimensions[
-                            output_index[:, None, None],
-                            left_index[None, :, None],
-                            right_index[None, None, :],
-                        ] = dimension
                         block_specs.append(
                             (
                                 left,
@@ -720,9 +772,12 @@ class TensorProduct(nn.Module):
                             )
                         )
 
-            flat_dimensions = dimensions.reshape(-1)
-            flat_offsets = torch.cumsum(flat_dimensions, dim=0) - flat_dimensions
+            output_prefix, left_prefixes, right_prefixes = _legacy_weight_prefixes(
+                in1_type, in2_type, out_type, coupling_dimensions
+            )
             blocks = []
+            weight_numel = 0
+            logical_paths = 0
             for (
                 left,
                 right,
@@ -735,17 +790,15 @@ class TensorProduct(nn.Module):
                 output_starts,
                 dimension,
             ) in block_specs:
-                output_index, left_index, right_index = torch.meshgrid(
-                    torch.tensor(output_fields),
-                    torch.tensor(left_fields),
-                    torch.tensor(right_fields),
-                    indexing="ij",
+                output_offsets = output_prefix[torch.tensor(output_fields)]
+                left_offsets = left_prefixes[output][torch.tensor(left_fields)]
+                right_offsets = right_prefixes[(output, left)][torch.tensor(right_fields)]
+                legacy_indices = (
+                    output_offsets[:, None, None, None]
+                    + left_offsets[None, :, None, None]
+                    + right_offsets[None, None, :, None]
+                    + torch.arange(dimension)[None, None, None, :]
                 )
-                flat_triples = (
-                    (output_index * len(in1_type) + left_index) * len(in2_type)
-                    + right_index
-                )
-                legacy_indices = flat_offsets[flat_triples][..., None] + torch.arange(dimension)
                 blocks.append(
                     _MultiplicityTensorProductBlock(
                         left,
@@ -758,13 +811,17 @@ class TensorProduct(nn.Module):
                         legacy_weight_indices=legacy_indices,
                     )
                 )
+                multiplicity_paths = (
+                    len(output_fields) * len(left_fields) * len(right_fields)
+                )
+                logical_paths += multiplicity_paths
+                weight_numel += multiplicity_paths * dimension
             self.blocks = nn.ModuleList(blocks)
             self.paths = nn.ModuleList()
-            logical_paths = int((dimensions > 0).sum())
             self.instructions = _LazyFullyConnectedInstructions(
                 in1_type, in2_type, out_type, logical_paths
             )
-            self.weight_numel = int(dimensions.sum())
+            self.weight_numel = weight_numel
             self._grouped = True
             return
 
