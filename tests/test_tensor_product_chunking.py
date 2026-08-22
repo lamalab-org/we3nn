@@ -132,6 +132,46 @@ def test_forced_chunked_float32_and_equivariance(monkeypatch):
     chunked.check_equivariance(atol=4e-5, rtol=4e-5)
 
 
+def test_chunked_unshared_weights_preserve_multiple_leading_dimensions(monkeypatch):
+    left_type, right_type, output_type = _types("cyclic", 6, "vector_other", 3)
+    reference = nn.TensorProduct(
+        left_type,
+        right_type,
+        output_type,
+        internal_weights=False,
+        shared_weights=False,
+    ).double()
+    chunked = nn.TensorProduct(
+        left_type,
+        right_type,
+        output_type,
+        internal_weights=False,
+        shared_weights=False,
+    ).double()
+    left = torch.randn(2, 3, left_type.size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(2, 3, right_type.size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(
+        2, 3, reference.weight_numel, dtype=torch.float64, requires_grad=True
+    )
+    left_chunked = left.detach().clone().requires_grad_()
+    right_chunked = right.detach().clone().requires_grad_()
+    weights_chunked = weights.detach().clone().requires_grad_()
+    expected = reference(left, right, weights)
+    expected.square().sum().backward()
+    monkeypatch.setattr(tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", 64)
+    actual = chunked(left_chunked, right_chunked, weights_chunked)
+    actual.square().sum().backward()
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    for actual_value, expected_value in (
+        (left_chunked, left),
+        (right_chunked, right),
+        (weights_chunked, weights),
+    ):
+        torch.testing.assert_close(
+            actual_value.grad, expected_value.grad, atol=3e-11, rtol=3e-11
+        )
+
+
 @pytest.mark.parametrize("shared_weights", [True, False])
 def test_kernel_tensor_product_uses_chunked_backend(monkeypatch, shared_weights):
     left_type, filter_type, output_type = _types("dihedral", 6, "vector_other", 3)
