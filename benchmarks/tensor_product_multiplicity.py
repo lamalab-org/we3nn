@@ -92,13 +92,47 @@ def storage_statistics(module: nn.TensorProduct) -> dict[str, int]:
         for name, tensor in buffers
         if "legacy_" in name
     )
+    layout_metadata_names = {
+        "left_indices",
+        "right_indices",
+        "output_indices",
+        "legacy_output_offsets",
+        "legacy_left_offsets",
+        "legacy_right_offsets",
+    }
+    layout_metadata_elements = sum(
+        tensor.numel()
+        for name, tensor in buffers
+        if name.rsplit(".", 1)[-1] in layout_metadata_names
+    )
     return {
         "parameter_bytes": parameter_bytes,
+        "parameter_elements": sum(tensor.numel() for _, tensor in parameters),
         "buffer_bytes": buffer_bytes,
+        "buffer_elements": sum(tensor.numel() for _, tensor in buffers),
         "persistent_buffer_bytes": persistent_buffer_bytes,
         "legacy_index_bytes": legacy_index_bytes,
+        "layout_metadata_elements": layout_metadata_elements,
         "buffers": len(buffers),
     }
+
+
+def grouped_cg_intermediate_bytes(
+    module: nn.TensorProduct, batch_size: int, element_size: int
+) -> int:
+    """Size of the explicit ``[..., U, V, P, O]`` grouped CG intermediates."""
+    if not module._grouped:
+        return 0
+    return sum(
+        batch_size
+        * block.left_pack.multiplicity
+        * block.right_pack.multiplicity
+        * block.coupling_shape[0]
+        * block.output.size
+        * element_size
+        for block in module.blocks
+        if block.kind == "cg"
+    )
 
 
 def benchmark(
@@ -122,7 +156,9 @@ def benchmark(
     rss_after_construction = process_peak_rss_bytes()
     _, peak_python = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    device_peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    constructor_device_peak = (
+        torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
+    )
 
     left = torch.randn(batch_size, module.in1_type.size, device=device, requires_grad=True)
     right = torch.randn(batch_size, module.in2_type.size, device=device, requires_grad=True)
@@ -136,8 +172,24 @@ def benchmark(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", MissingRepresentationMetadataWarning)
+        if device.type == "cuda":
+            baseline = torch.cuda.memory_allocated(device)
+            torch.cuda.reset_peak_memory_stats(device)
         forward()
+        forward_device_peak = (
+            torch.cuda.max_memory_allocated(device) - baseline
+            if device.type == "cuda"
+            else 0
+        )
+        if device.type == "cuda":
+            baseline = torch.cuda.memory_allocated(device)
+            torch.cuda.reset_peak_memory_stats(device)
         forward_backward()
+        forward_backward_device_peak = (
+            torch.cuda.max_memory_allocated(device) - baseline
+            if device.type == "cuda"
+            else 0
+        )
         forward_ms = median_milliseconds(forward, repeats)
         forward_backward_ms = median_milliseconds(forward_backward, repeats)
 
@@ -150,13 +202,22 @@ def benchmark(
         "forward_ms": forward_ms,
         "forward_backward_ms": forward_backward_ms,
         "python_peak_mib": peak_python / 2**20,
-        "device_peak_mib": device_peak / 2**20,
+        "constructor_device_peak_mib": constructor_device_peak / 2**20,
+        "forward_device_peak_mib": forward_device_peak / 2**20,
+        "forward_backward_device_peak_mib": forward_backward_device_peak / 2**20,
         "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
         "constructor_rss_delta_mib": max(0, rss_after_construction - rss_before) / 2**20,
         "tensor_storage_mib": tensor_storage / 2**20,
         "parameter_mib": storage["parameter_bytes"] / 2**20,
+        "parameter_elements": storage["parameter_elements"],
         "persistent_buffer_mib": storage["persistent_buffer_bytes"] / 2**20,
         "legacy_index_mib": storage["legacy_index_bytes"] / 2**20,
+        "registered_buffer_elements": storage["buffer_elements"],
+        "layout_metadata_elements": storage["layout_metadata_elements"],
+        "grouped_cg_intermediate_mib": grouped_cg_intermediate_bytes(
+            module, batch_size, left.element_size()
+        )
+        / 2**20,
         "modules": sum(1 for _ in module.modules()),
         "grouped_blocks": len(module.blocks),
         "legacy_paths": len(module.paths),
@@ -196,13 +257,19 @@ def benchmark_external_constructor(
         "forward_ms": float("nan"),
         "forward_backward_ms": float("nan"),
         "python_peak_mib": peak_python / 2**20,
-        "device_peak_mib": 0.0,
+        "constructor_device_peak_mib": 0.0,
+        "forward_device_peak_mib": float("nan"),
+        "forward_backward_device_peak_mib": float("nan"),
         "process_peak_rss_mib": rss_after / 2**20,
         "constructor_rss_delta_mib": max(0, rss_after - rss_before) / 2**20,
         "tensor_storage_mib": (storage["parameter_bytes"] + storage["buffer_bytes"]) / 2**20,
         "parameter_mib": storage["parameter_bytes"] / 2**20,
+        "parameter_elements": storage["parameter_elements"],
         "persistent_buffer_mib": storage["persistent_buffer_bytes"] / 2**20,
         "legacy_index_mib": storage["legacy_index_bytes"] / 2**20,
+        "registered_buffer_elements": storage["buffer_elements"],
+        "layout_metadata_elements": storage["layout_metadata_elements"],
+        "grouped_cg_intermediate_mib": float("nan"),
         "modules": sum(1 for _ in module.modules()),
         "grouped_blocks": len(module.blocks),
         "legacy_paths": len(module.paths),
@@ -219,7 +286,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--multiplicities", type=int, nargs="+", default=[8, 16, 32, 64, 128])
     parser.add_argument(
-        "--constructor-multiplicities", type=int, nargs="+", default=[128, 256, 512]
+        "--constructor-multiplicities",
+        type=int,
+        nargs="+",
+        default=[32, 64, 128, 256, 512],
     )
     parser.add_argument("--legacy-max", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -229,8 +299,11 @@ def main() -> None:
     device = torch.device(args.device)
     print(
         "implementation,m,constructor_ms,forward_ms,forward_backward_ms,"
-        "python_peak_mib,device_peak_mib,process_peak_rss_mib,constructor_rss_delta_mib,"
-        "tensor_storage_mib,parameter_mib,persistent_buffer_mib,legacy_index_mib,"
+        "python_peak_mib,constructor_device_peak_mib,forward_device_peak_mib,"
+        "forward_backward_device_peak_mib,process_peak_rss_mib,constructor_rss_delta_mib,"
+        "tensor_storage_mib,parameter_mib,parameter_elements,persistent_buffer_mib,"
+        "legacy_index_mib,registered_buffer_elements,layout_metadata_elements,"
+        "grouped_cg_intermediate_mib,"
         "modules,grouped_blocks,legacy_paths,buffers,"
         "coupling_buffers,weight_numel"
     )
