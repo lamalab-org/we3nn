@@ -22,6 +22,98 @@ from .representation_tensor import (
 )
 
 
+_CG_MAX_INTERMEDIATE_BYTES = 256 << 20
+
+
+@dataclass(frozen=True)
+class _CGChunkPlan:
+    """Private execution plan bounding the explicit ``[..., U, V, P, O]`` tensor."""
+
+    batch_size: int
+    batch_chunk: int
+    left_multiplicity: int
+    left_chunk: int
+    right_multiplicity: int
+    right_chunk: int
+    bytes_per_uv_sample: int
+    estimated_unchunked_bytes: int
+    max_intermediate_bytes: int
+
+    @property
+    def chunked(self) -> bool:
+        return (
+            self.batch_chunk < self.batch_size
+            or self.left_chunk < self.left_multiplicity
+            or self.right_chunk < self.right_multiplicity
+        )
+
+    @property
+    def estimated_chunk_bytes(self) -> int:
+        return (
+            min(self.batch_size, self.batch_chunk)
+            * self.left_chunk
+            * self.right_chunk
+            * self.bytes_per_uv_sample
+        )
+
+
+def _cg_chunk_plan(
+    *,
+    batch_size: int,
+    left_multiplicity: int,
+    right_multiplicity: int,
+    coupling_multiplicity: int,
+    output_size: int,
+    element_size: int,
+    max_intermediate_bytes: int | None = None,
+) -> _CGChunkPlan:
+    """Plan large contractions without changing their mathematical summation."""
+    budget = (
+        _CG_MAX_INTERMEDIATE_BYTES
+        if max_intermediate_bytes is None
+        else int(max_intermediate_bytes)
+    )
+    if budget <= 0:
+        raise ValueError("CG intermediate memory budget must be positive")
+    element_factor = coupling_multiplicity * output_size * element_size
+    unchunked = batch_size * left_multiplicity * right_multiplicity * element_factor
+    if unchunked <= budget:
+        return _CGChunkPlan(
+            batch_size,
+            batch_size,
+            left_multiplicity,
+            left_multiplicity,
+            right_multiplicity,
+            right_multiplicity,
+            element_factor,
+            unchunked,
+            budget,
+        )
+
+    capacity = max(1, budget // element_factor)
+    batch_chunk = min(batch_size, max(1, capacity // (left_multiplicity * right_multiplicity)))
+    remaining = max(1, capacity // batch_chunk)
+    left_chunk, right_chunk = left_multiplicity, right_multiplicity
+    if left_chunk * right_chunk > remaining:
+        if left_multiplicity >= right_multiplicity:
+            left_chunk = max(1, min(left_multiplicity, remaining // right_multiplicity))
+            right_chunk = max(1, min(right_multiplicity, remaining // left_chunk))
+        else:
+            right_chunk = max(1, min(right_multiplicity, remaining // left_multiplicity))
+            left_chunk = max(1, min(left_multiplicity, remaining // right_chunk))
+    return _CGChunkPlan(
+        batch_size,
+        batch_chunk,
+        left_multiplicity,
+        left_chunk,
+        right_multiplicity,
+        right_chunk,
+        element_factor,
+        unchunked,
+        budget,
+    )
+
+
 @dataclass(frozen=True)
 class TensorProductInstruction:
     """Select one equivariant field triple in :class:`TensorProduct`.
@@ -465,6 +557,83 @@ class _MultiplicityTensorProductBlock(nn.Module):
         matrices = self._matrices(matrices_name, value)
         return torch.einsum("...ui,qia->...uqa", value, matrices)
 
+    def _forward_cg(
+        self,
+        left: torch.Tensor,
+        right: torch.Tensor,
+        coefficients: torch.Tensor,
+        *,
+        shared: bool,
+    ) -> torch.Tensor:
+        basis = self.coupling_basis.to(device=left.device, dtype=left.dtype)
+        leading_shape = left.shape[:-2]
+        batch_size = math.prod(leading_shape)
+        output_multiplicity, left_multiplicity, right_multiplicity = (
+            self.multiplicity_shape
+        )
+        plan = _cg_chunk_plan(
+            batch_size=batch_size,
+            left_multiplicity=left_multiplicity,
+            right_multiplicity=right_multiplicity,
+            coupling_multiplicity=basis.shape[0],
+            output_size=self.output.size,
+            element_size=left.element_size(),
+        )
+        if not plan.chunked:
+            coupled = torch.einsum("poij,...ui,...vj->...uvpo", basis, left, right)
+            equation = "muvp,...uvpo->...mo" if shared else "...muvp,...uvpo->...mo"
+            return torch.einsum(equation, coefficients, coupled)
+
+        flat_left = left.reshape(batch_size, left_multiplicity, self.left.size)
+        flat_right = right.reshape(batch_size, right_multiplicity, self.right.size)
+        flat_coefficients = (
+            coefficients
+            if shared
+            else coefficients.reshape(batch_size, *self.weight_shape)
+        )
+        batch_outputs = []
+        for batch_start in range(0, batch_size, plan.batch_chunk):
+            batch_stop = min(batch_start + plan.batch_chunk, batch_size)
+            left_batch = flat_left[batch_start:batch_stop]
+            right_batch = flat_right[batch_start:batch_stop]
+            coefficients_batch = (
+                flat_coefficients
+                if shared
+                else flat_coefficients[batch_start:batch_stop]
+            )
+            output_batch = None
+            for left_start in range(0, left_multiplicity, plan.left_chunk):
+                left_stop = min(left_start + plan.left_chunk, left_multiplicity)
+                for right_start in range(0, right_multiplicity, plan.right_chunk):
+                    right_stop = min(
+                        right_start + plan.right_chunk, right_multiplicity
+                    )
+                    coupled = torch.einsum(
+                        "poij,bui,bvj->buvpo",
+                        basis,
+                        left_batch[:, left_start:left_stop],
+                        right_batch[:, right_start:right_stop],
+                    )
+                    if shared:
+                        selected = coefficients_batch[
+                            :, left_start:left_stop, right_start:right_stop, :
+                        ]
+                        partial = torch.einsum("muvp,buvpo->bmo", selected, coupled)
+                    else:
+                        selected = coefficients_batch[
+                            ...,
+                            left_start:left_stop,
+                            right_start:right_stop,
+                            :,
+                        ]
+                        partial = torch.einsum("bmuvp,buvpo->bmo", selected, coupled)
+                    output_batch = (
+                        partial if output_batch is None else output_batch + partial
+                    )
+            batch_outputs.append(output_batch)
+        output = batch_outputs[0] if len(batch_outputs) == 1 else torch.cat(batch_outputs)
+        return output.reshape(*leading_shape, output_multiplicity, self.output.size)
+
     def forward(
         self, left: torch.Tensor, right: torch.Tensor, weight: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -476,10 +645,7 @@ class _MultiplicityTensorProductBlock(nn.Module):
         shared = coefficients.ndim == len(self.weight_shape)
 
         if self.kind == "cg":
-            basis = self.coupling_basis.to(device=left.device, dtype=left.dtype)
-            coupled = torch.einsum("poij,...ui,...vj->...uvpo", basis, left, right)
-            equation = "muvp,...uvpo->...mo" if shared else "...muvp,...uvpo->...mo"
-            return torch.einsum(equation, coefficients, coupled)
+            return self._forward_cg(left, right, coefficients, shared=shared)
 
         order_scale = math.sqrt(self.group.order())
         if self.kind == "output_regular":
