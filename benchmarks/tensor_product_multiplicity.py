@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib
+import math
 import resource
 import sys
 import time
@@ -21,6 +23,9 @@ import torch
 
 from we3nn import gspaces, nn
 from we3nn.nn.representation_tensor import MissingRepresentationMetadataWarning
+
+
+tensor_product_module = importlib.import_module("we3nn.nn.tensor_product")
 
 
 def synchronize() -> None:
@@ -282,6 +287,117 @@ def benchmark_external_constructor(
     }
 
 
+def construct_edge_product(
+    left_multiplicity: int,
+    right_multiplicity: int,
+    output_multiplicity: int,
+    *,
+    device: torch.device,
+):
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    e1, e2 = space.irrep(1, 1), space.irrep(1, 2)
+    return nn.TensorProduct(
+        nn.FieldType(space, [e1] * left_multiplicity),
+        nn.FieldType(space, [e1] * right_multiplicity),
+        nn.FieldType(space, [e2] * output_multiplicity),
+    ).to(device)
+
+
+def message_passing_estimate(
+    edge_count: int,
+    module: nn.TensorProduct,
+    *,
+    budget_bytes: int,
+) -> dict[str, float | int]:
+    block = module.blocks[0]
+    plan = tensor_product_module._cg_chunk_plan(
+        batch_size=edge_count,
+        left_multiplicity=block.left_pack.multiplicity,
+        right_multiplicity=block.right_pack.multiplicity,
+        coupling_multiplicity=block.coupling_shape[0],
+        output_size=block.output.size,
+        element_size=block.weight.element_size(),
+        max_intermediate_bytes=budget_bytes,
+    )
+    chunks = (
+        math.ceil(edge_count / plan.batch_chunk)
+        * math.ceil(plan.left_multiplicity / plan.left_chunk)
+        * math.ceil(plan.right_multiplicity / plan.right_chunk)
+    )
+    parameter_bytes = sum(
+        parameter.numel() * parameter.element_size() for parameter in module.parameters()
+    )
+    return {
+        "edges": edge_count,
+        "weight_numel": module.weight_numel,
+        "parameter_mib": parameter_bytes / 2**20,
+        "shared_external_weight_mib": parameter_bytes / 2**20,
+        "per_edge_external_weight_mib": edge_count * parameter_bytes / 2**20,
+        "unbounded_cg_temporary_mib": plan.estimated_unchunked_bytes / 2**20,
+        "bounded_cg_temporary_mib": plan.estimated_chunk_bytes / 2**20,
+        "chunk_contractions": chunks,
+        "batch_chunk": plan.batch_chunk,
+        "left_chunk": plan.left_chunk,
+        "right_chunk": plan.right_chunk,
+    }
+
+
+def benchmark_edge_mode(
+    module: nn.TensorProduct,
+    edge_count: int,
+    *,
+    budget_bytes: int,
+    repeats: int,
+    device: torch.device,
+) -> dict[str, float]:
+    left = torch.randn(
+        edge_count, module.in1_type.size, device=device, requires_grad=True
+    )
+    right = torch.randn(
+        edge_count, module.in2_type.size, device=device, requires_grad=True
+    )
+    previous_budget = tensor_product_module._CG_MAX_INTERMEDIATE_BYTES
+    tensor_product_module._CG_MAX_INTERMEDIATE_BYTES = budget_bytes
+
+    def forward():
+        return module(left, right)
+
+    def forward_backward():
+        module.zero_grad(set_to_none=True)
+        left.grad = right.grad = None
+        forward().square().mean().backward()
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", MissingRepresentationMetadataWarning)
+            forward()
+            forward_backward()
+            if device.type == "cuda":
+                baseline_allocated = torch.cuda.memory_allocated(device)
+                baseline_reserved = torch.cuda.memory_reserved(device)
+                torch.cuda.reset_peak_memory_stats(device)
+            forward_ms = median_milliseconds(forward, repeats)
+            forward_backward_ms = median_milliseconds(forward_backward, repeats)
+            if device.type == "cuda":
+                allocated_peak = max(
+                    0, torch.cuda.max_memory_allocated(device) - baseline_allocated
+                )
+                reserved_peak = max(
+                    0, torch.cuda.max_memory_reserved(device) - baseline_reserved
+                )
+            else:
+                allocated_peak = reserved_peak = 0
+    finally:
+        tensor_product_module._CG_MAX_INTERMEDIATE_BYTES = previous_budget
+    return {
+        "forward_ms": forward_ms,
+        "forward_backward_ms": forward_backward_ms,
+        "cuda_allocated_peak_mib": allocated_peak / 2**20,
+        "cuda_reserved_peak_mib": reserved_peak / 2**20,
+        "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--multiplicities", type=int, nargs="+", default=[8, 16, 32, 64, 128])
@@ -295,6 +411,17 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--edge-counts", type=int, nargs="+", default=[1_000, 10_000, 100_000])
+    parser.add_argument("--edge-left-multiplicity", type=int, default=128)
+    parser.add_argument("--edge-right-multiplicity", type=int, default=128)
+    parser.add_argument("--edge-output-multiplicity", type=int, default=8)
+    parser.add_argument("--edge-budget-mib", type=float, default=256.0)
+    parser.add_argument(
+        "--edge-run-max",
+        type=int,
+        default=0,
+        help="execute bounded and unbounded modes only for edge counts at or below this value",
+    )
     args = parser.parse_args()
     device = torch.device(args.device)
     print(
@@ -321,6 +448,53 @@ def main() -> None:
     for multiplicity in args.constructor_multiplicities:
         result = benchmark_external_constructor(multiplicity, device=device)
         print(",".join(str(result[key]) for key in result))
+
+    edge_module = construct_edge_product(
+        args.edge_left_multiplicity,
+        args.edge_right_multiplicity,
+        args.edge_output_multiplicity,
+        device=device,
+    )
+    edge_budget = int(args.edge_budget_mib * 2**20)
+    print(
+        "edge_mode,edges,weight_numel,parameter_mib,shared_external_weight_mib,"
+        "per_edge_external_weight_mib,unbounded_cg_temporary_mib,"
+        "bounded_cg_temporary_mib,chunk_contractions,batch_chunk,left_chunk,right_chunk,"
+        "forward_ms,forward_backward_ms,cuda_allocated_peak_mib,"
+        "cuda_reserved_peak_mib,process_peak_rss_mib"
+    )
+    for edge_count in args.edge_counts:
+        estimate = message_passing_estimate(
+            edge_count, edge_module, budget_bytes=edge_budget
+        )
+        execution_modes = ()
+        if edge_count <= args.edge_run_max:
+            execution_modes = (
+                ("bounded", edge_budget),
+                ("unbounded", estimate["unbounded_cg_temporary_mib"] * 2**20 + 1),
+            )
+        if not execution_modes:
+            execution_modes = (("estimate", None),)
+        for mode, mode_budget in execution_modes:
+            execution = (
+                {
+                    "forward_ms": float("nan"),
+                    "forward_backward_ms": float("nan"),
+                    "cuda_allocated_peak_mib": float("nan"),
+                    "cuda_reserved_peak_mib": float("nan"),
+                    "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
+                }
+                if mode_budget is None
+                else benchmark_edge_mode(
+                    edge_module,
+                    edge_count,
+                    budget_bytes=int(mode_budget),
+                    repeats=args.repeats,
+                    device=device,
+                )
+            )
+            row = {"edge_mode": mode, **estimate, **execution}
+            print(",".join(str(row[key]) for key in row))
 
 
 if __name__ == "__main__":
