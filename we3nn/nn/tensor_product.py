@@ -178,13 +178,27 @@ class _PackedOccurrences:
         self.size = representation.size
         self.multiplicity = len(starts)
         self.contiguous_slice = _contiguous_field_slice(starts, representation.size)
-        self.indices = torch.tensor(starts)[:, None] + torch.arange(representation.size)[None, :]
+        self.indices = (
+            torch.empty(0, dtype=torch.long)
+            if self.contiguous_slice is not None
+            else torch.tensor(starts)[:, None]
+            + torch.arange(representation.size)[None, :]
+        )
 
     def pack(self, tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         if self.contiguous_slice is not None:
             value = tensor[..., self.contiguous_slice]
             return value.reshape(*tensor.shape[:-1], self.multiplicity, self.size)
         return tensor[..., indices]
+
+    def coordinate_indices(self, device: torch.device) -> torch.Tensor:
+        if self.contiguous_slice is not None:
+            return torch.arange(
+                self.contiguous_slice.start,
+                self.contiguous_slice.stop,
+                device=device,
+            ).reshape(self.multiplicity, self.size)
+        return self.indices.to(device=device)
 
 
 class _LazyFullyConnectedInstructions(Sequence[TensorProductInstruction]):
@@ -484,8 +498,12 @@ class _MultiplicityTensorProductBlock(nn.Module):
         return torch.einsum("qoa,...mqa->...mo", output_matrices, intermediate) / order_scale
 
     def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-        flat_indices = self.output_indices.reshape(-1)
         flat_value = value.reshape(*value.shape[:-2], -1)
+        if self.output_pack.contiguous_slice is not None:
+            target = self.output_pack.contiguous_slice
+            output[..., target] = output[..., target] + flat_value
+            return output
+        flat_indices = self.output_indices.reshape(-1)
         return output.index_add(-1, flat_indices, flat_value)
 
     def kernel_basis_entries(
@@ -549,8 +567,8 @@ class _MultiplicityTensorProductBlock(nn.Module):
 
         weight_indices = self.legacy_weight_indices(right.device)
 
-        output_coordinates = self.output_indices.to(device=right.device)
-        input_coordinates = self.left_indices.to(device=right.device)
+        output_coordinates = self.output_pack.coordinate_indices(right.device)
+        input_coordinates = self.left_pack.coordinate_indices(right.device)
         matrix_indices = (
             output_coordinates[:, None, None, None, :, None] * input_size
             + input_coordinates[None, :, None, None, None, :]
