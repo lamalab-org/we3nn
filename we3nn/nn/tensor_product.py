@@ -852,6 +852,55 @@ class TensorProduct(nn.Module):
             output[..., start:end] = output[..., start:end] + value
         return wrap_if_typed(output, self.out_type, typed)
 
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        """Migrate legacy fully-connected per-path state dictionaries."""
+        if self._grouped:
+            legacy_prefix = f"{prefix}paths."
+            legacy_keys = [key for key in state_dict if key.startswith(legacy_prefix)]
+            if legacy_keys:
+                legacy_weights = []
+                path_index = 0
+                while True:
+                    key = f"{legacy_prefix}{path_index}.weight"
+                    if key not in state_dict:
+                        break
+                    legacy_weights.append(state_dict[key].reshape(-1))
+                    path_index += 1
+                flat_weights = torch.cat(legacy_weights) if legacy_weights else None
+                for block_index, block in enumerate(self.blocks):
+                    if block.weight is not None and flat_weights is not None:
+                        if block.legacy_weight_slice is not None:
+                            selected = flat_weights[block.legacy_weight_slice]
+                        else:
+                            selected = flat_weights[block.legacy_weight_indices]
+                        state_dict[f"{prefix}blocks.{block_index}.weight"] = selected.reshape(
+                            block.weight_shape
+                        )
+                    if block.coupling_basis.numel():
+                        state_dict[f"{prefix}blocks.{block_index}.coupling_basis"] = (
+                            block.coupling_basis
+                        )
+                for key in legacy_keys:
+                    del state_dict[key]
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     def evaluate_output_shape(self, input1_shape: tuple[int, ...], input2_shape: tuple[int, ...]) -> tuple[int, ...]:
         if input1_shape[:-1] != input2_shape[:-1]:
             raise ValueError("input leading dimensions must match")

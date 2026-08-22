@@ -110,3 +110,29 @@ def test_128_multiplicity_constructs_one_block_without_path_objects():
     assert product.weight_numel == multiplicity**3 * coupling_count
     # The only parameter is the mathematically required multiplicity tensor.
     assert sum(parameter.numel() for parameter in product.parameters()) == product.weight_numel
+    x = torch.randn(1, product.in1_type.size, requires_grad=True)
+    y = torch.randn(1, product.in2_type.size, requires_grad=True)
+    result = product(x, y)
+    assert result.shape == (1, product.out_type.size)
+    result.square().mean().backward()
+    assert x.grad is not None and y.grad is not None
+    assert product.blocks[0].weight.grad is not None
+
+
+def test_legacy_internal_path_checkpoint_loads_into_grouped_blocks():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    scalar, e1, e2 = space.trivial_repr, space.irrep(1, 1), space.irrep(1, 2)
+    left = nn.FieldType(space, [e1, scalar, e1])
+    right = nn.FieldType(space, [e2, e1])
+    output = nn.FieldType(space, [scalar, e2, scalar])
+    grouped = nn.TensorProduct(left, right, output).double()
+    legacy = nn.TensorProduct(
+        left,
+        right,
+        output,
+        instructions=list(grouped.instructions),
+    ).double()
+    grouped.load_state_dict(legacy.state_dict())
+    x = torch.randn(3, left.size, dtype=torch.float64)
+    y = torch.randn(3, right.size, dtype=torch.float64)
+    torch.testing.assert_close(grouped(x, y), legacy(x, y), atol=2e-12, rtol=2e-12)
