@@ -180,7 +180,7 @@ def test_grouped_regular_kernel_basis_matches_legacy_paths(regular_position):
     )
 
 
-def test_grouped_spherical_kernel_matches_legacy_from_points_and_gradients():
+def test_grouped_spherical_kernel_matches_legacy_from_points_and_gradients(monkeypatch):
     torch.manual_seed(37)
     group = gspaces.flipRot2dOnR2(6).fibergroup
     space = gspaces.no_base_space(group)
@@ -201,6 +201,10 @@ def test_grouped_spherical_kernel_matches_legacy_from_points_and_gradients():
     features_old = features_new.detach().clone().requires_grad_()
     points_old = points_new.detach().clone().requires_grad_()
     weights_old = weights_new.detach().clone().requires_grad_()
+    tensor_product_module = __import__(
+        "we3nn.nn.tensor_product", fromlist=["_CG_MAX_INTERMEDIATE_BYTES"]
+    )
+    monkeypatch.setattr(tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", 1)
     actual = grouped.forward_from_points(features_new, points_new, weights_new)
     expected = legacy.forward_from_points(features_old, points_old, weights_old)
     torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
