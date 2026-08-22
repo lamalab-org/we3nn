@@ -363,3 +363,40 @@ def test_large_external_construction_has_no_cubic_tensor_metadata(multiplicity):
         if "legacy_" in name or name.endswith("_indices")
     )
     assert sum(buffer.numel() for buffer in product.buffers()) < 10 * multiplicity
+
+
+def test_lazy_instruction_slices_do_not_materialize_logical_path_space():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    scalar, e1, e2 = space.trivial_repr, space.irrep(1, 1), space.irrep(1, 2)
+    multiplicity = 512
+    homogeneous = nn.TensorProduct(
+        nn.FieldType(space, [e1] * multiplicity),
+        nn.FieldType(space, [e1] * multiplicity),
+        nn.FieldType(space, [e2] * multiplicity),
+        internal_weights=False,
+    )
+    first = homogeneous.instructions[:10]
+    last = homogeneous.instructions[-10:]
+    reversed_last = homogeneous.instructions[-1:-11:-1]
+    assert not isinstance(first, tuple)
+    assert len(first) == len(last) == len(reversed_last) == 10
+    assert tuple(first) == tuple(homogeneous.instructions[index] for index in range(10))
+    assert tuple(last) == tuple(
+        homogeneous.instructions[index]
+        for index in range(len(homogeneous.instructions) - 10, len(homogeneous.instructions))
+    )
+    assert tuple(reversed_last) == tuple(reversed(tuple(last)))
+    assert first[2:5][0] == homogeneous.instructions[2]
+
+    mixed = nn.TensorProduct(
+        nn.FieldType(space, [e1, scalar, e2]),
+        nn.FieldType(space, [scalar, e2, e1]),
+        nn.FieldType(space, [e2, scalar, e1]),
+        internal_weights=False,
+    )
+    materialized = tuple(iter(mixed.instructions))
+    assert tuple(mixed.instructions[:]) == materialized
+    assert all(
+        mixed.instructions[index] == instruction
+        for index, instruction in enumerate(materialized)
+    )

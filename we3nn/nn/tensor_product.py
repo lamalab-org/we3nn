@@ -302,11 +302,37 @@ class _LazyFullyConnectedInstructions(Sequence[TensorProductInstruction]):
         in2_type: FieldType,
         out_type: FieldType,
         length: int,
+        coupling_dimensions: dict[
+            tuple[Representation, Representation, Representation], int
+        ],
     ):
         self.in1_type = in1_type
         self.in2_type = in2_type
         self.out_type = out_type
         self._length = int(length)
+        self.coupling_dimensions = coupling_dimensions
+        right_counts: dict[Representation, int] = defaultdict(int)
+        left_counts: dict[Representation, int] = defaultdict(int)
+        for right in in2_type:
+            right_counts[right] += 1
+        for left in in1_type:
+            left_counts[left] += 1
+        self._right_paths = {
+            (output, left): sum(
+                count
+                for right, count in right_counts.items()
+                if coupling_dimensions.get((output, left, right), 0)
+            )
+            for output in set(out_type)
+            for left in set(in1_type)
+        }
+        self._paths_per_output = {
+            output: sum(
+                count * self._right_paths[(output, left)]
+                for left, count in left_counts.items()
+            )
+            for output in set(out_type)
+        }
 
     def __len__(self) -> int:
         return self._length
@@ -315,32 +341,89 @@ class _LazyFullyConnectedInstructions(Sequence[TensorProductInstruction]):
         for i_out, output in enumerate(self.out_type):
             for i_in1, left in enumerate(self.in1_type):
                 for i_in2, right in enumerate(self.in2_type):
-                    dimension = _coupling_dimension(left, right, output)
+                    dimension = self.coupling_dimensions.get((output, left, right), 0)
                     if dimension:
-                        regular = output.group.regular_repr
-                        if output is regular:
-                            path_shape = (left.size, right.size)
-                        elif left is regular:
-                            path_shape = (output.size, right.size)
-                        elif right is regular:
-                            path_shape = (output.size, left.size)
-                        else:
-                            path_shape = (dimension,)
-                        yield TensorProductInstruction(
-                            i_in1, i_in2, i_out, path_shape=path_shape
-                        )
+                        yield self._instruction(i_in1, i_in2, i_out, dimension)
+
+    def _instruction(
+        self, i_in1: int, i_in2: int, i_out: int, dimension: int
+    ) -> TensorProductInstruction:
+        left, right, output = (
+            self.in1_type[i_in1],
+            self.in2_type[i_in2],
+            self.out_type[i_out],
+        )
+        regular = output.group.regular_repr
+        if output is regular:
+            path_shape = (left.size, right.size)
+        elif left is regular:
+            path_shape = (output.size, right.size)
+        elif right is regular:
+            path_shape = (output.size, left.size)
+        else:
+            path_shape = (dimension,)
+        return TensorProductInstruction(i_in1, i_in2, i_out, path_shape=path_shape)
+
+    def _instruction_at(self, index: int) -> TensorProductInstruction:
+        remaining = index
+        selected_output = None
+        for i_out, output in enumerate(self.out_type):
+            count = self._paths_per_output[output]
+            if remaining < count:
+                selected_output = (i_out, output)
+                break
+            remaining -= count
+        if selected_output is None:
+            raise IndexError(index)
+        i_out, output = selected_output
+
+        selected_left = None
+        for i_in1, left in enumerate(self.in1_type):
+            count = self._right_paths[(output, left)]
+            if remaining < count:
+                selected_left = (i_in1, left)
+                break
+            remaining -= count
+        if selected_left is None:
+            raise IndexError(index)
+        i_in1, left = selected_left
+
+        for i_in2, right in enumerate(self.in2_type):
+            dimension = self.coupling_dimensions.get((output, left, right), 0)
+            if not dimension:
+                continue
+            if remaining == 0:
+                return self._instruction(i_in1, i_in2, i_out, dimension)
+            remaining -= 1
+        raise IndexError(index)
 
     def __getitem__(self, index):
         if isinstance(index, slice):
-            return tuple(self)[index]
+            return _LazyInstructionView(self, range(*index.indices(len(self))))
         if index < 0:
             index += len(self)
         if not 0 <= index < len(self):
             raise IndexError(index)
-        for current, instruction in enumerate(self):
-            if current == index:
-                return instruction
-        raise IndexError(index)
+        return self._instruction_at(index)
+
+
+class _LazyInstructionView(Sequence[TensorProductInstruction]):
+    """A constant-memory slice of the logical fully connected instructions."""
+
+    def __init__(self, parent: _LazyFullyConnectedInstructions, indices: range):
+        self.parent = parent
+        self.indices = indices
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __iter__(self) -> Iterator[TensorProductInstruction]:
+        return (self.parent[index] for index in self.indices)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _LazyInstructionView(self.parent, self.indices[index])
+        return self.parent[self.indices[index]]
 
 
 class _MultiplicityTensorProductBlock(nn.Module):
@@ -1104,7 +1187,11 @@ class TensorProduct(nn.Module):
             self.blocks = nn.ModuleList(blocks)
             self.paths = nn.ModuleList()
             self.instructions = _LazyFullyConnectedInstructions(
-                in1_type, in2_type, out_type, logical_paths
+                in1_type,
+                in2_type,
+                out_type,
+                logical_paths,
+                coupling_dimensions,
             )
             self.weight_numel = weight_numel
             self._coupling_dimensions = coupling_dimensions
