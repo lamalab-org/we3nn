@@ -598,6 +598,21 @@ class TensorProduct(nn.Module):
     :class:`TensorProductInstruction` objects. Each instruction spans every
     independent real equivariant coupling for that field triple.
 
+    The fully connected default groups repeated copies of each unique
+    representation triple into one execution block. A block stores weights as
+    ``(out_multiplicity, left_multiplicity, right_multiplicity, *coupling_shape)``
+    and performs one or a few batched contractions. This changes neither the
+    number nor the ordering of logical reduced weights: every ordered field
+    triple remains independently learnable, and flattened external weights
+    retain the legacy ``output, left, right, coupling`` order. Explicit
+    instructions continue to use the sparse per-path executor.
+
+    For a grouped default, :attr:`instructions` is a lazy sequence: ``len()``
+    reports the logical field-path count without allocating that many Python
+    objects. :attr:`blocks` contains the compact execution modules, while
+    :attr:`paths` is empty. Explicit products expose their legacy modules in
+    :attr:`paths` and have no grouped blocks.
+
     With ``internal_weights=False``, pass a final-axis weight tensor to
     :meth:`forward`. Shared weights have shape ``(weight_numel,)``; with
     ``shared_weights=False`` they have shape ``(..., weight_numel)`` matching
@@ -622,6 +637,11 @@ class TensorProduct(nn.Module):
     is required. Use :class:`FullyConnectedTensorProduct` to emphasize the
     all-path default or :class:`FullTensorProduct` for an unprojected Kronecker
     product.
+
+    Checkpoints written by the former per-path fully connected implementation
+    are migrated automatically when loaded into a matching grouped module.
+    New grouped checkpoints use ``blocks.*.weight`` keys; old software which
+    only understands ``paths.*.weight`` cannot load them without upgrading.
     """
 
     def __init__(
@@ -951,6 +971,9 @@ class FullyConnectedTensorProduct(TensorProduct):
     Its constructor and forward arguments are identical; omitting
     ``instructions`` enumerates every nonzero real equivariant Hom-space path.
     Reduced weights can be internal, shared external, or per-sample external.
+    Repeated representation copies are executed as multiplicity axes, so the
+    module count scales with unique representation triples rather than the
+    Cartesian product of field multiplicities.
 
     Raw inputs emit :class:`MissingRepresentationMetadataWarning`. Two
     correctly typed :class:`RepresentationTensor` inputs produce a typed
