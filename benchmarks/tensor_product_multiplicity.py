@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import gc
+import resource
+import sys
 import time
 import tracemalloc
 import warnings
@@ -37,7 +39,18 @@ def median_milliseconds(function, repeats: int) -> float:
     return float(torch.tensor(samples).median())
 
 
-def construct(multiplicity: int, *, legacy: bool, device: torch.device):
+def process_peak_rss_bytes() -> int:
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
+
+
+def construct(
+    multiplicity: int,
+    *,
+    legacy: bool,
+    device: torch.device,
+    internal_weights: bool = True,
+):
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
     e1, e2 = space.irrep(1, 1), space.irrep(1, 2)
     left = nn.FieldType(space, [e1] * multiplicity)
@@ -47,10 +60,45 @@ def construct(multiplicity: int, *, legacy: bool, device: torch.device):
         compact = nn.TensorProduct(left, right, output, internal_weights=False)
         instructions = list(compact.instructions)
         del compact
-        module = nn.TensorProduct(left, right, output, instructions=instructions)
+        module = nn.TensorProduct(
+            left,
+            right,
+            output,
+            instructions=instructions,
+            internal_weights=internal_weights,
+        )
     else:
-        module = nn.TensorProduct(left, right, output)
+        module = nn.TensorProduct(
+            left, right, output, internal_weights=internal_weights
+        )
     return module.to(device)
+
+
+def storage_statistics(module: nn.TensorProduct) -> dict[str, int]:
+    parameters = tuple(module.named_parameters())
+    buffers = tuple((name, buffer) for name, buffer in module.named_buffers() if buffer.numel())
+    parameter_bytes = sum(
+        tensor.numel() * tensor.element_size() for _, tensor in parameters
+    )
+    buffer_bytes = sum(tensor.numel() * tensor.element_size() for _, tensor in buffers)
+    parameter_names = {name for name, _ in parameters}
+    persistent_buffer_bytes = sum(
+        tensor.numel() * tensor.element_size()
+        for name, tensor in module.state_dict().items()
+        if name not in parameter_names
+    )
+    legacy_index_bytes = sum(
+        tensor.numel() * tensor.element_size()
+        for name, tensor in buffers
+        if "legacy_" in name
+    )
+    return {
+        "parameter_bytes": parameter_bytes,
+        "buffer_bytes": buffer_bytes,
+        "persistent_buffer_bytes": persistent_buffer_bytes,
+        "legacy_index_bytes": legacy_index_bytes,
+        "buffers": len(buffers),
+    }
 
 
 def benchmark(
@@ -66,10 +114,12 @@ def benchmark(
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     synchronize()
+    rss_before = process_peak_rss_bytes()
     start = time.perf_counter_ns()
     module = construct(multiplicity, legacy=legacy, device=device)
     synchronize()
     construction_ms = (time.perf_counter_ns() - start) / 1e6
+    rss_after_construction = process_peak_rss_bytes()
     _, peak_python = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     device_peak = torch.cuda.max_memory_allocated(device) if device.type == "cuda" else 0
@@ -91,11 +141,8 @@ def benchmark(
         forward_ms = median_milliseconds(forward, repeats)
         forward_backward_ms = median_milliseconds(forward_backward, repeats)
 
-    buffers = [buffer for buffer in module.buffers() if buffer.numel()]
-    tensor_storage = sum(
-        tensor.numel() * tensor.element_size()
-        for tensor in (*tuple(module.parameters()), *tuple(buffers))
-    )
+    storage = storage_statistics(module)
+    tensor_storage = storage["parameter_bytes"] + storage["buffer_bytes"]
     return {
         "implementation": "legacy" if legacy else "grouped",
         "m": multiplicity,
@@ -104,11 +151,62 @@ def benchmark(
         "forward_backward_ms": forward_backward_ms,
         "python_peak_mib": peak_python / 2**20,
         "device_peak_mib": device_peak / 2**20,
+        "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
+        "constructor_rss_delta_mib": max(0, rss_after_construction - rss_before) / 2**20,
         "tensor_storage_mib": tensor_storage / 2**20,
+        "parameter_mib": storage["parameter_bytes"] / 2**20,
+        "persistent_buffer_mib": storage["persistent_buffer_bytes"] / 2**20,
+        "legacy_index_mib": storage["legacy_index_bytes"] / 2**20,
         "modules": sum(1 for _ in module.modules()),
         "grouped_blocks": len(module.blocks),
         "legacy_paths": len(module.paths),
-        "buffers": len(buffers),
+        "buffers": storage["buffers"],
+        "coupling_buffers": sum(
+            name.endswith("coupling_basis") and buffer.numel() > 0
+            for name, buffer in module.named_buffers()
+        ),
+        "weight_numel": module.weight_numel,
+    }
+
+
+def benchmark_external_constructor(
+    multiplicity: int, *, device: torch.device
+) -> dict[str, float | int | str]:
+    """Measure metadata construction without allocating the O(m^3) weights."""
+    gc.collect()
+    tracemalloc.start()
+    rss_before = process_peak_rss_bytes()
+    start = time.perf_counter_ns()
+    module = construct(
+        multiplicity,
+        legacy=False,
+        device=device,
+        internal_weights=False,
+    )
+    synchronize()
+    construction_ms = (time.perf_counter_ns() - start) / 1e6
+    rss_after = process_peak_rss_bytes()
+    _, peak_python = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    storage = storage_statistics(module)
+    return {
+        "implementation": "grouped-external-constructor",
+        "m": multiplicity,
+        "constructor_ms": construction_ms,
+        "forward_ms": float("nan"),
+        "forward_backward_ms": float("nan"),
+        "python_peak_mib": peak_python / 2**20,
+        "device_peak_mib": 0.0,
+        "process_peak_rss_mib": rss_after / 2**20,
+        "constructor_rss_delta_mib": max(0, rss_after - rss_before) / 2**20,
+        "tensor_storage_mib": (storage["parameter_bytes"] + storage["buffer_bytes"]) / 2**20,
+        "parameter_mib": storage["parameter_bytes"] / 2**20,
+        "persistent_buffer_mib": storage["persistent_buffer_bytes"] / 2**20,
+        "legacy_index_mib": storage["legacy_index_bytes"] / 2**20,
+        "modules": sum(1 for _ in module.modules()),
+        "grouped_blocks": len(module.blocks),
+        "legacy_paths": len(module.paths),
+        "buffers": storage["buffers"],
         "coupling_buffers": sum(
             name.endswith("coupling_basis") and buffer.numel() > 0
             for name, buffer in module.named_buffers()
@@ -120,6 +218,9 @@ def benchmark(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--multiplicities", type=int, nargs="+", default=[8, 16, 32, 64, 128])
+    parser.add_argument(
+        "--constructor-multiplicities", type=int, nargs="+", default=[128, 256, 512]
+    )
     parser.add_argument("--legacy-max", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
@@ -128,7 +229,9 @@ def main() -> None:
     device = torch.device(args.device)
     print(
         "implementation,m,constructor_ms,forward_ms,forward_backward_ms,"
-        "python_peak_mib,device_peak_mib,tensor_storage_mib,modules,grouped_blocks,legacy_paths,buffers,"
+        "python_peak_mib,device_peak_mib,process_peak_rss_mib,constructor_rss_delta_mib,"
+        "tensor_storage_mib,parameter_mib,persistent_buffer_mib,legacy_index_mib,"
+        "modules,grouped_blocks,legacy_paths,buffers,"
         "coupling_buffers,weight_numel"
     )
     for multiplicity in args.multiplicities:
@@ -142,6 +245,9 @@ def main() -> None:
                 device=device,
             )
             print(",".join(str(result[key]) for key in result))
+    for multiplicity in args.constructor_multiplicities:
+        result = benchmark_external_constructor(multiplicity, device=device)
+        print(",".join(str(result[key]) for key in result))
 
 
 if __name__ == "__main__":
