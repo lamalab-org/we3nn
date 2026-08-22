@@ -322,6 +322,92 @@ class _MultiplicityTensorProductBlock(nn.Module):
         flat_value = value.reshape(*value.shape[:-2], -1)
         return output.index_add(-1, flat_indices, flat_value)
 
+    def kernel_basis_entries(
+        self, filter_features: torch.Tensor, input_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return vectorized sparse entries for all weights in this block."""
+        right = self.pack_right(filter_features)
+        leading_shape = right.shape[:-2]
+        output_multiplicity, left_multiplicity, right_multiplicity = self.multiplicity_shape
+        coupling_numel = math.prod(self.coupling_shape)
+
+        if self.kind == "cg":
+            basis = self.coupling_basis.to(device=right.device, dtype=right.dtype)
+            base = torch.einsum("poij,...vj->...vpoi", basis, right)
+        elif self.kind == "output_regular":
+            right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
+            if self.left is self.group.regular_repr:
+                left_transform = torch.nn.functional.one_hot(
+                    self.regular_indices,
+                    num_classes=self.left.size,
+                ).to(device=right.device, dtype=right.dtype)
+            else:
+                left_transform = self._matrices("left_matrices", right).transpose(-1, -2)
+            base = torch.einsum(
+                "qai,...vqb->...vabqi", left_transform, right_transformed
+            ) / math.sqrt(self.group.order())
+        elif self.kind == "left_regular":
+            right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
+            output_matrices = self._matrices("output_matrices", right)
+            base = torch.einsum(
+                "qoa,...vqb->...vaboq", output_matrices, right_transformed
+            ) / math.sqrt(self.group.order())
+        else:
+            output_matrices = self._matrices("output_matrices", right)
+            left_matrices = self._matrices("left_matrices", right).transpose(-1, -2)
+            base = torch.einsum(
+                "qoa,qbi,...vq->...vaboi", output_matrices, left_matrices, right
+            ) / math.sqrt(self.group.order())
+
+        base = base.reshape(
+            *leading_shape,
+            right_multiplicity,
+            coupling_numel,
+            self.output.size,
+            self.left.size,
+        )
+        values = base.unsqueeze(-5).unsqueeze(-5).expand(
+            *leading_shape,
+            output_multiplicity,
+            left_multiplicity,
+            right_multiplicity,
+            coupling_numel,
+            self.output.size,
+            self.left.size,
+        )
+        values = values.reshape(
+            *leading_shape,
+            self.weight_numel,
+            self.output.size * self.left.size,
+        )
+
+        if self.legacy_weight_slice is not None:
+            weight_indices = torch.arange(
+                self.legacy_weight_slice.start,
+                self.legacy_weight_slice.stop,
+                device=right.device,
+            )
+        else:
+            weight_indices = self.legacy_weight_indices.to(device=right.device)
+
+        output_coordinates = self.output_indices.to(device=right.device)
+        input_coordinates = self.left_indices.to(device=right.device)
+        matrix_indices = (
+            output_coordinates[:, None, None, None, :, None] * input_size
+            + input_coordinates[None, :, None, None, None, :]
+        ).expand(
+            output_multiplicity,
+            left_multiplicity,
+            right_multiplicity,
+            coupling_numel,
+            self.output.size,
+            self.left.size,
+        )
+        matrix_indices = matrix_indices.reshape(
+            self.weight_numel, self.output.size * self.left.size
+        )
+        return weight_indices, matrix_indices, values
+
 
 class _TensorProductPath(nn.Module):
     def __init__(

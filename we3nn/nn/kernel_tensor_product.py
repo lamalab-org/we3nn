@@ -104,6 +104,19 @@ class KernelTensorProduct(nn.Module):
             self.rep_out.size,
             self.rep_in.size,
         )
+        if self.tensor_product._grouped:
+            kernels_flat = kernels.flatten(-2)
+            for block in self.tensor_product.blocks:
+                weight_indices, matrix_indices, values = block.kernel_basis_entries(
+                    filter_features, self.rep_in.size
+                )
+                kernels_flat[
+                    ...,
+                    weight_indices[:, None],
+                    matrix_indices,
+                ] = values
+            return kernels
+
         weight_offset = 0
         for instruction, path in zip(
             self.tensor_product.instructions, self.tensor_product.paths
