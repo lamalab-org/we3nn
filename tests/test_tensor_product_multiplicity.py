@@ -18,6 +18,33 @@ def _legacy_from(grouped):
     ).double()
 
 
+def _legacy_internal_from(grouped):
+    return nn.TensorProduct(
+        grouped.in1_type,
+        grouped.in2_type,
+        grouped.out_type,
+        instructions=list(grouped.instructions),
+    ).double()
+
+
+def _legacy_parameter_gradients(product):
+    return torch.cat([path.weight.grad.reshape(-1) for path in product.paths])
+
+
+def _grouped_parameter_gradients_in_legacy_order(product):
+    layout = nn.TensorProduct(
+        product.in1_type,
+        product.in2_type,
+        product.out_type,
+        internal_weights=False,
+    )
+    flattened = product.blocks[0].weight.grad.new_empty(product.weight_numel)
+    for weighted_block, layout_block in zip(product.blocks, layout.blocks):
+        indices = layout_block.legacy_weight_indices(flattened.device)
+        flattened[indices] = weighted_block.weight.grad.reshape(-1)
+    return flattened
+
+
 @pytest.mark.parametrize("kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)])
 @pytest.mark.parametrize("shared_weights", [True, False])
 def test_grouped_default_matches_legacy_paths_outputs_and_gradients(
@@ -61,6 +88,47 @@ def test_grouped_default_matches_legacy_paths_outputs_and_gradients(
     torch.testing.assert_close(weight_new.grad, weight_old.grad, atol=2e-11, rtol=2e-11)
 
 
+@pytest.mark.parametrize("kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)])
+@pytest.mark.parametrize("coupling", ["scalar_scalar", "scalar_vector", "vector_vector"])
+def test_grouped_internal_ordinary_couplings_match_legacy_parameter_gradients(
+    kind, n, coupling
+):
+    base = gspaces.rot2dOnR2(n) if kind == "cyclic" else gspaces.flipRot2dOnR2(n)
+    space = gspaces.no_base_space(base.fibergroup)
+    scalar = space.trivial_repr
+    vector = space.irrep(1) if kind == "cyclic" else space.irrep(1, 1)
+    if coupling == "scalar_scalar":
+        left_rep, right_rep, output_rep = scalar, scalar, scalar
+    elif coupling == "scalar_vector":
+        left_rep, right_rep, output_rep = scalar, vector, vector
+    else:
+        left_rep, right_rep, output_rep = vector, vector, scalar
+    left = nn.FieldType(space, [left_rep] * 2)
+    right = nn.FieldType(space, [right_rep] * 2)
+    output = nn.FieldType(space, [output_rep] * 2)
+    grouped = nn.TensorProduct(left, right, output).double()
+    legacy = _legacy_internal_from(grouped)
+    grouped.load_state_dict(legacy.state_dict())
+
+    left_new = torch.randn(2, left.size, dtype=torch.float64, requires_grad=True)
+    right_new = torch.randn(2, right.size, dtype=torch.float64, requires_grad=True)
+    left_old = left_new.detach().clone().requires_grad_()
+    right_old = right_new.detach().clone().requires_grad_()
+    actual = grouped(left_new, right_new)
+    expected = legacy(left_old, right_old)
+    torch.testing.assert_close(actual, expected, atol=2e-12, rtol=2e-12)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    torch.testing.assert_close(left_new.grad, left_old.grad, atol=2e-11, rtol=2e-11)
+    torch.testing.assert_close(right_new.grad, right_old.grad, atol=2e-11, rtol=2e-11)
+    torch.testing.assert_close(
+        _grouped_parameter_gradients_in_legacy_order(grouped),
+        _legacy_parameter_gradients(legacy),
+        atol=2e-11,
+        rtol=2e-11,
+    )
+
+
 @pytest.mark.parametrize("regular_position", ["output", "left", "right", "both_inputs", "all"])
 def test_grouped_regular_multiplicities_match_legacy_paths(regular_position):
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(4).fibergroup)
@@ -79,6 +147,63 @@ def test_grouped_regular_multiplicities_match_legacy_paths(regular_position):
     torch.testing.assert_close(
         grouped(x, y, weights), legacy(x, y, weights), atol=3e-12, rtol=3e-12
     )
+
+
+@pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
+@pytest.mark.parametrize("weight_mode", ["internal", "shared", "unshared"])
+def test_grouped_regular_paths_match_legacy_outputs_and_gradients(
+    regular_position, weight_mode
+):
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(4).fibergroup)
+    vector, regular = space.irrep(1, 1), space.regular_repr
+    left_rep = regular if regular_position in {"left", "all"} else vector
+    right_rep = regular if regular_position in {"right", "all"} else vector
+    output_rep = regular if regular_position in {"output", "all"} else vector
+    left = nn.FieldType(space, [left_rep] * 2)
+    right = nn.FieldType(space, [right_rep] * 2)
+    output = nn.FieldType(space, [output_rep] * 2)
+    internal = weight_mode == "internal"
+    shared = weight_mode != "unshared"
+    grouped = nn.TensorProduct(
+        left,
+        right,
+        output,
+        internal_weights=internal,
+        shared_weights=shared,
+    ).double()
+    if internal:
+        legacy = _legacy_internal_from(grouped)
+        grouped.load_state_dict(legacy.state_dict())
+    else:
+        legacy = _legacy_from(grouped)
+
+    left_new = torch.randn(2, left.size, dtype=torch.float64, requires_grad=True)
+    right_new = torch.randn(2, right.size, dtype=torch.float64, requires_grad=True)
+    left_old = left_new.detach().clone().requires_grad_()
+    right_old = right_new.detach().clone().requires_grad_()
+    weight_shape = (grouped.weight_numel,) if shared else (2, grouped.weight_numel)
+    weight_new = (
+        None
+        if internal
+        else torch.randn(*weight_shape, dtype=torch.float64, requires_grad=True)
+    )
+    weight_old = None if internal else weight_new.detach().clone().requires_grad_()
+    actual = grouped(left_new, right_new, weight_new)
+    expected = legacy(left_old, right_old, weight_old)
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    torch.testing.assert_close(left_new.grad, left_old.grad, atol=3e-11, rtol=3e-11)
+    torch.testing.assert_close(right_new.grad, right_old.grad, atol=3e-11, rtol=3e-11)
+    if internal:
+        torch.testing.assert_close(
+            _grouped_parameter_gradients_in_legacy_order(grouped),
+            _legacy_parameter_gradients(legacy),
+            atol=3e-11,
+            rtol=3e-11,
+        )
+    else:
+        torch.testing.assert_close(weight_new.grad, weight_old.grad, atol=3e-11, rtol=3e-11)
 
 
 def test_homogeneous_multiplicity_is_one_execution_block():
@@ -152,6 +277,22 @@ def test_legacy_internal_path_checkpoint_loads_into_grouped_blocks():
     x = torch.randn(3, left.size, dtype=torch.float64)
     y = torch.randn(3, right.size, dtype=torch.float64)
     torch.testing.assert_close(grouped(x, y), legacy(x, y), atol=2e-12, rtol=2e-12)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_legacy_checkpoint_loads_into_grouped_module_already_on_cuda():
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    scalar, e1, e2 = space.trivial_repr, space.irrep(1, 1), space.irrep(1, 2)
+    left = nn.FieldType(space, [e1, scalar, e1])
+    right = nn.FieldType(space, [e2, e1])
+    output = nn.FieldType(space, [scalar, e2, scalar])
+    target = nn.TensorProduct(left, right, output).double().cuda()
+    legacy = _legacy_internal_from(target)
+    target.load_state_dict(legacy.state_dict())
+    legacy = legacy.cuda()
+    x = torch.randn(3, left.size, dtype=torch.float64, device="cuda")
+    y = torch.randn(3, right.size, dtype=torch.float64, device="cuda")
+    torch.testing.assert_close(target(x, y), legacy(x, y), atol=2e-12, rtol=2e-12)
 
 
 def test_modern_internal_checkpoint_does_not_generate_legacy_layout(monkeypatch):
