@@ -135,6 +135,26 @@ def _unshared_cg_chunk(
     return torch.einsum("bmuvp,buvpo->bmo", coefficients, coupled)
 
 
+def _shared_uvu_cg_chunk(
+    basis: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    coefficients: torch.Tensor,
+) -> torch.Tensor:
+    coupled = torch.einsum("poij,bui,bvj->buvpo", basis, left, right)
+    return torch.einsum("uvp,buvpo->buo", coefficients, coupled)
+
+
+def _unshared_uvu_cg_chunk(
+    basis: torch.Tensor,
+    left: torch.Tensor,
+    right: torch.Tensor,
+    coefficients: torch.Tensor,
+) -> torch.Tensor:
+    coupled = torch.einsum("poij,bui,bvj->buvpo", basis, left, right)
+    return torch.einsum("buvp,buvpo->buo", coefficients, coupled)
+
+
 @dataclass(frozen=True)
 class TensorProductInstruction:
     """Select one equivariant field triple in :class:`TensorProduct`.
@@ -715,7 +735,10 @@ class _MultiplicityTensorProductBlock(nn.Module):
         )
         if not plan.chunked:
             coupled = torch.einsum("poij,...ui,...vj->...uvpo", basis, left, right)
-            equation = "muvp,...uvpo->...mo" if shared else "...muvp,...uvpo->...mo"
+            if self.connection_mode == "uvu":
+                equation = "uvp,...uvpo->...uo" if shared else "...uvp,...uvpo->...uo"
+            else:
+                equation = "muvp,...uvpo->...mo" if shared else "...muvp,...uvpo->...mo"
             return torch.einsum(equation, coefficients, coupled)
 
         flat_left = left.reshape(batch_size, left_multiplicity, self.left.size)
@@ -736,8 +759,10 @@ class _MultiplicityTensorProductBlock(nn.Module):
                 else flat_coefficients[batch_start:batch_stop]
             )
             output_batch = None
+            left_outputs = []
             for left_start in range(0, left_multiplicity, plan.left_chunk):
                 left_stop = min(left_start + plan.left_chunk, left_multiplicity)
+                left_output = None
                 for right_start in range(0, right_multiplicity, plan.right_chunk):
                     right_stop = min(
                         right_start + plan.right_chunk, right_multiplicity
@@ -745,18 +770,30 @@ class _MultiplicityTensorProductBlock(nn.Module):
                     selected_left = left_batch[:, left_start:left_stop]
                     selected_right = right_batch[:, right_start:right_stop]
                     if shared:
-                        selected = coefficients_batch[
-                            :, left_start:left_stop, right_start:right_stop, :
-                        ]
-                        contraction = _shared_cg_chunk
+                        if self.connection_mode == "uvu":
+                            selected = coefficients_batch[
+                                left_start:left_stop, right_start:right_stop, :
+                            ]
+                            contraction = _shared_uvu_cg_chunk
+                        else:
+                            selected = coefficients_batch[
+                                :, left_start:left_stop, right_start:right_stop, :
+                            ]
+                            contraction = _shared_cg_chunk
                     else:
-                        selected = coefficients_batch[
-                            ...,
-                            left_start:left_stop,
-                            right_start:right_stop,
-                            :,
-                        ]
-                        contraction = _unshared_cg_chunk
+                        if self.connection_mode == "uvu":
+                            selected = coefficients_batch[
+                                ..., left_start:left_stop, right_start:right_stop, :
+                            ]
+                            contraction = _unshared_uvu_cg_chunk
+                        else:
+                            selected = coefficients_batch[
+                                ...,
+                                left_start:left_stop,
+                                right_start:right_stop,
+                                :,
+                            ]
+                            contraction = _unshared_cg_chunk
                     checkpointed = torch.is_grad_enabled() and any(
                         value.requires_grad
                         for value in (selected_left, selected_right, selected)
@@ -775,9 +812,22 @@ class _MultiplicityTensorProductBlock(nn.Module):
                             basis, selected_left, selected_right, selected
                         )
                     )
-                    output_batch = (
-                        partial if output_batch is None else output_batch + partial
-                    )
+                    if self.connection_mode == "uvu":
+                        left_output = (
+                            partial if left_output is None else left_output + partial
+                        )
+                    else:
+                        output_batch = (
+                            partial if output_batch is None else output_batch + partial
+                        )
+                if self.connection_mode == "uvu":
+                    left_outputs.append(left_output)
+            if self.connection_mode == "uvu":
+                output_batch = (
+                    left_outputs[0]
+                    if len(left_outputs) == 1
+                    else torch.cat(left_outputs, dim=1)
+                )
             batch_outputs.append(output_batch)
         output = batch_outputs[0] if len(batch_outputs) == 1 else torch.cat(batch_outputs)
         return output.reshape(*leading_shape, output_multiplicity, self.output.size)
@@ -1381,7 +1431,7 @@ class TensorProduct(nn.Module):
                 raise ValueError(f"external weight must have shape {expected}")
 
         output = input1.new_zeros(*input1.shape[:-1], self.out_type.size)
-        if self._grouped and self.connection_mode == "uvw":
+        if self._grouped:
             for block in self.blocks:
                 external = None
                 if not self.internal_weights:
@@ -1415,7 +1465,7 @@ class TensorProduct(nn.Module):
         error_msgs,
     ):
         """Migrate legacy fully-connected per-path state dictionaries."""
-        if self._grouped:
+        if self._grouped and self.connection_mode == "uvw":
             legacy_prefix = f"{prefix}paths."
             legacy_keys = [key for key in state_dict if key.startswith(legacy_prefix)]
             if legacy_keys:
