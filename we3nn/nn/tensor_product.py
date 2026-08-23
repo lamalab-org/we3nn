@@ -451,7 +451,7 @@ class _LazyFullyConnectedInstructions(Sequence[TensorProductInstruction]):
 class _LazyInstructionView(Sequence[TensorProductInstruction]):
     """A constant-memory slice of the logical fully connected instructions."""
 
-    def __init__(self, parent: _LazyFullyConnectedInstructions, indices: range):
+    def __init__(self, parent: Sequence[TensorProductInstruction], indices: range):
         self.parent = parent
         self.indices = indices
 
@@ -465,6 +465,63 @@ class _LazyInstructionView(Sequence[TensorProductInstruction]):
         if isinstance(index, slice):
             return _LazyInstructionView(self.parent, self.indices[index])
         return self.parent[self.indices[index]]
+
+
+class _LazyUVUInstructions(Sequence[TensorProductInstruction]):
+    """Logical field paths for occurrence-paired grouped ``uvu`` blocks."""
+
+    def __init__(self, blocks: Iterable[_MultiplicityTensorProductBlock]):
+        self.descriptors = tuple(
+            (
+                block.left_fields,
+                block.right_fields,
+                block.output_fields,
+                block.coupling_shape,
+            )
+            for block in blocks
+        )
+        self._length = sum(
+            len(left_fields) * len(right_fields)
+            for left_fields, right_fields, _, _ in self.descriptors
+        )
+
+    def __len__(self) -> int:
+        return self._length
+
+    @staticmethod
+    def _instruction(descriptor, local_index: int) -> TensorProductInstruction:
+        left_fields, right_fields, output_fields, coupling_shape = descriptor
+        right_multiplicity = len(right_fields)
+        left_occurrence, right_occurrence = divmod(local_index, right_multiplicity)
+        return TensorProductInstruction(
+            i_in1=left_fields[left_occurrence],
+            i_in2=right_fields[right_occurrence],
+            i_out=output_fields[left_occurrence],
+            connection_mode="uvu",
+            path_shape=coupling_shape,
+        )
+
+    def __iter__(self) -> Iterator[TensorProductInstruction]:
+        for descriptor in self.descriptors:
+            left_fields, right_fields, _, _ = descriptor
+            for local_index in range(len(left_fields) * len(right_fields)):
+                yield self._instruction(descriptor, local_index)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return _LazyInstructionView(self, range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        remaining = index
+        for descriptor in self.descriptors:
+            left_fields, right_fields, _, _ = descriptor
+            count = len(left_fields) * len(right_fields)
+            if remaining < count:
+                return self._instruction(descriptor, remaining)
+            remaining -= count
+        raise IndexError(index)
 
 
 class _MultiplicityTensorProductBlock(nn.Module):
@@ -1372,7 +1429,7 @@ class TensorProduct(nn.Module):
                     coupling_dimensions,
                 )
                 if connection_mode == "uvw"
-                else ()
+                else _LazyUVUInstructions(blocks)
             )
             self.weight_numel = weight_numel
             self._coupling_dimensions = coupling_dimensions
