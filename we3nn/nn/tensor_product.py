@@ -166,8 +166,12 @@ class TensorProductInstruction:
     controls whether the path consumes a learned or external reduced weight,
     and ``path_weight`` applies an additional fixed scalar normalization.
 
-    ``path_shape`` is populated by the constructed module and reports the
-    reduced-weight shape required by this instruction.
+    Explicit field-level instructions support only ``"uvw"``. A grouped
+    ``TensorProduct(connection_mode="uvu")`` exposes lazy instructions with
+    ``connection_mode="uvu"`` for introspection, where each item denotes the
+    tied field path ``(left_u, right_v, output_u)``. ``path_shape`` is
+    populated by the constructed module and reports the reduced-weight shape
+    required by this logical path.
     """
 
     i_in1: int
@@ -1261,11 +1265,14 @@ class TensorProduct(nn.Module):
     The fully connected default groups repeated copies of each unique
     representation triple into one execution block. A block stores weights as
     ``(out_multiplicity, left_multiplicity, right_multiplicity, *coupling_shape)``
-    and performs one or a few batched contractions. This changes neither the
-    number nor the ordering of logical reduced weights: every ordered field
-    triple remains independently learnable, and flattened external weights
-    retain the legacy ``output, left, right, coupling`` order. Explicit
-    instructions continue to use the sparse per-path executor.
+    and performs one or a few batched contractions. In the default ``"uvw"``
+    mode this changes neither the number nor the ordering of logical reduced
+    weights: every ordered field triple remains independently learnable, and
+    flattened external weights retain the legacy
+    ``output, left, right, coupling`` order. In opt-in ``"uvu"`` mode a block
+    instead stores ``(left_multiplicity, right_multiplicity, *coupling_shape)``;
+    its contiguous external layout is ``left, right, coupling``. Explicit
+    instructions continue to use the sparse field-level ``"uvw"`` executor.
 
     For a grouped default, :attr:`instructions` is a lazy sequence: ``len()``
     reports the logical field-path count without allocating that many Python
@@ -1287,6 +1294,8 @@ class TensorProduct(nn.Module):
             connects every left/right occurrence to every output occurrence.
             ``"uvu"`` pairs output and left occurrences in encounter order and
             requires their multiplicities to match for every compatible block.
+            Pairing uses occurrence order within each representation group,
+            not absolute field indices.
         internal_weights: Store reduced weights as module parameters.
         shared_weights: Share one external weight vector over leading axes.
 
@@ -1672,9 +1681,10 @@ class TensorProduct(nn.Module):
 class FullyConnectedTensorProduct(TensorProduct):
     """Connect every compatible input-field pair to every requested output.
 
-    This is the fully connected specialization of :class:`TensorProduct`.
-    Its constructor and forward arguments are identical; omitting
-    ``instructions`` enumerates every nonzero real equivariant Hom-space path.
+    This is the ``"uvw"`` fully connected specialization of
+    :class:`TensorProduct`. Omitting ``instructions`` enumerates every nonzero
+    real equivariant Hom-space path. To preserve a left multiplicity index,
+    construct :class:`TensorProduct` directly with ``connection_mode="uvu"``.
     Reduced weights can be internal, shared external, or per-sample external.
     Repeated representation copies are executed as multiplicity axes, so the
     module count scales with unique representation triples rather than the
