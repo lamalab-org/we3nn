@@ -462,14 +462,17 @@ class _MultiplicityTensorProductBlock(nn.Module):
         right_fields: tuple[int, ...],
         output_fields: tuple[int, ...],
         *,
+        connection_mode: str,
         internal_weights: bool,
         legacy_weight_offsets: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
+        external_weight_slice: slice | None = None,
     ):
         super().__init__()
         self.left = left
         self.right = right
         self.output = output
         self.group = output.group
+        self.connection_mode = connection_mode
         self.left_fields = left_fields
         self.right_fields = right_fields
         self.output_fields = output_fields
@@ -501,7 +504,23 @@ class _MultiplicityTensorProductBlock(nn.Module):
             self.right_pack.multiplicity,
         )
         self.coupling_shape = tuple(coupling_shape)
-        self.weight_shape = (*self.multiplicity_shape, *self.coupling_shape)
+        output_multiplicity, left_multiplicity, right_multiplicity = (
+            self.multiplicity_shape
+        )
+        if connection_mode == "uvw":
+            multiplicity_weight_shape = self.multiplicity_shape
+        elif connection_mode == "uvu":
+            if output_multiplicity != left_multiplicity:
+                raise ValueError(
+                    "connection_mode='uvu' requires matching output and left "
+                    f"multiplicities, got {output_multiplicity} and "
+                    f"{left_multiplicity}"
+                )
+            multiplicity_weight_shape = (left_multiplicity, right_multiplicity)
+        else:
+            raise ValueError(f"unsupported connection_mode={connection_mode!r}")
+        self.multiplicity_weight_shape = multiplicity_weight_shape
+        self.weight_shape = (*multiplicity_weight_shape, *self.coupling_shape)
         self.weight_numel = math.prod(self.weight_shape)
         if internal_weights:
             self.weight = nn.Parameter(torch.empty(self.weight_shape))
@@ -534,6 +553,7 @@ class _MultiplicityTensorProductBlock(nn.Module):
         )
 
         empty = torch.empty(0, dtype=torch.long)
+        self.external_weight_slice = external_weight_slice
         if legacy_weight_offsets is None:
             self.legacy_weight_slice = None
             output_offsets = left_offsets = right_offsets = empty
@@ -585,7 +605,11 @@ class _MultiplicityTensorProductBlock(nn.Module):
         return self.right_pack.pack(tensor, self.right_indices)
 
     def external_weight(self, weight: torch.Tensor) -> torch.Tensor:
-        selected = self._select_legacy_weight(weight)
+        selected = (
+            weight[..., self.external_weight_slice]
+            if self.external_weight_slice is not None
+            else self._select_legacy_weight(weight)
+        )
         return selected.reshape(*weight.shape[:-1], *self.weight_shape)
 
     def _legacy_index_chunks(
@@ -641,6 +665,12 @@ class _MultiplicityTensorProductBlock(nn.Module):
 
     def legacy_weight_indices(self, device: torch.device) -> torch.Tensor:
         """Materialize legacy indices only when a sampled kernel requires them."""
+        if self.external_weight_slice is not None:
+            return torch.arange(
+                self.external_weight_slice.start,
+                self.external_weight_slice.stop,
+                device=device,
+            )
         if self.legacy_weight_slice is not None:
             return torch.arange(
                 self.legacy_weight_slice.start,
@@ -1095,6 +1125,10 @@ class TensorProduct(nn.Module):
         in2_type: Representation carried by the second input's final axis.
         out_type: Requested direct sum of output representations.
         instructions: Optional subset and configuration of coupling paths.
+        connection_mode: Grouped multiplicity wiring. ``"uvw"`` independently
+            connects every left/right occurrence to every output occurrence.
+            ``"uvu"`` pairs output and left occurrences in encounter order and
+            requires their multiplicities to match for every compatible block.
         internal_weights: Store reduced weights as module parameters.
         shared_weights: Share one external weight vector over leading axes.
 
@@ -1123,6 +1157,7 @@ class TensorProduct(nn.Module):
         out_type: FieldType | Representation,
         instructions: Iterable[TensorProductInstruction | tuple[int, int, int]] | None = None,
         *,
+        connection_mode: str = "uvw",
         internal_weights: bool = True,
         shared_weights: bool = True,
     ):
@@ -1137,11 +1172,19 @@ class TensorProduct(nn.Module):
             raise ValueError("all FieldTypes must use the same group instance")
         if internal_weights and not shared_weights:
             raise ValueError("internal tensor-product weights must be shared")
+        if connection_mode not in {"uvw", "uvu"}:
+            raise ValueError("connection_mode must be 'uvw' or 'uvu'")
+        if instructions is not None and connection_mode != "uvw":
+            raise ValueError(
+                "connection_mode applies to grouped TensorProduct with "
+                "instructions=None; explicit instructions remain field-level 'uvw' paths"
+            )
         self.in1_type = in1_type
         self.in2_type = in2_type
         self.out_type = out_type
         self.internal_weights = bool(internal_weights)
         self.shared_weights = bool(shared_weights)
+        self.connection_mode = connection_mode
 
         if instructions is None:
             left_occurrences = _representation_occurrences(in1_type)
@@ -1156,6 +1199,15 @@ class TensorProduct(nn.Module):
                         coupling_dimensions[(output, left, right)] = dimension
                         if not dimension:
                             continue
+                        if connection_mode == "uvu" and len(output_fields) != len(
+                            left_fields
+                        ):
+                            raise ValueError(
+                                "connection_mode='uvu' requires matching left/output "
+                                f"multiplicities for coupling {left.name} x {right.name} "
+                                f"-> {output.name}: {len(left_fields)} != "
+                                f"{len(output_fields)}"
+                            )
                         block_specs.append(
                             (
                                 left,
@@ -1172,13 +1224,14 @@ class TensorProduct(nn.Module):
                         )
 
             legacy_prefixes = None
-            if not internal_weights:
+            if not internal_weights and connection_mode == "uvw":
                 legacy_prefixes = _legacy_weight_prefixes(
                     in1_type, in2_type, out_type, coupling_dimensions
                 )
             blocks = []
             weight_numel = 0
             logical_paths = 0
+            uvu_external_offset = 0
             for (
                 left,
                 right,
@@ -1199,34 +1252,48 @@ class TensorProduct(nn.Module):
                         left_prefixes[output][torch.tensor(left_fields)],
                         right_prefixes[(output, left)][torch.tensor(right_fields)],
                     )
-                blocks.append(
-                    _MultiplicityTensorProductBlock(
-                        left,
-                        right,
-                        output,
-                        left_starts,
-                        right_starts,
-                        output_starts,
-                        left_fields,
-                        right_fields,
-                        output_fields,
-                        internal_weights=internal_weights,
-                        legacy_weight_offsets=legacy_offsets,
+                uvu_weight_numel = len(left_fields) * len(right_fields) * dimension
+                external_weight_slice = None
+                if not internal_weights and connection_mode == "uvu":
+                    external_weight_slice = slice(
+                        uvu_external_offset, uvu_external_offset + uvu_weight_numel
                     )
+                    uvu_external_offset += uvu_weight_numel
+                block = _MultiplicityTensorProductBlock(
+                    left,
+                    right,
+                    output,
+                    left_starts,
+                    right_starts,
+                    output_starts,
+                    left_fields,
+                    right_fields,
+                    output_fields,
+                    connection_mode=connection_mode,
+                    internal_weights=internal_weights,
+                    legacy_weight_offsets=legacy_offsets,
+                    external_weight_slice=external_weight_slice,
                 )
+                blocks.append(block)
                 multiplicity_paths = (
                     len(output_fields) * len(left_fields) * len(right_fields)
+                    if connection_mode == "uvw"
+                    else len(left_fields) * len(right_fields)
                 )
                 logical_paths += multiplicity_paths
-                weight_numel += multiplicity_paths * dimension
+                weight_numel += block.weight_numel
             self.blocks = nn.ModuleList(blocks)
             self.paths = nn.ModuleList()
-            self.instructions = _LazyFullyConnectedInstructions(
-                in1_type,
-                in2_type,
-                out_type,
-                logical_paths,
-                coupling_dimensions,
+            self.instructions = (
+                _LazyFullyConnectedInstructions(
+                    in1_type,
+                    in2_type,
+                    out_type,
+                    logical_paths,
+                    coupling_dimensions,
+                )
+                if connection_mode == "uvw"
+                else ()
             )
             self.weight_numel = weight_numel
             self._coupling_dimensions = coupling_dimensions
@@ -1314,7 +1381,7 @@ class TensorProduct(nn.Module):
                 raise ValueError(f"external weight must have shape {expected}")
 
         output = input1.new_zeros(*input1.shape[:-1], self.out_type.size)
-        if self._grouped:
+        if self._grouped and self.connection_mode == "uvw":
             for block in self.blocks:
                 external = None
                 if not self.internal_weights:
@@ -1459,6 +1526,29 @@ class FullyConnectedTensorProduct(TensorProduct):
     correctly typed :class:`RepresentationTensor` inputs produce a typed
     output; mismatched metadata raises ``TypeError``.
     """
+
+    def __init__(
+        self,
+        in1_type: FieldType | Representation,
+        in2_type: FieldType | Representation,
+        out_type: FieldType | Representation,
+        instructions: Iterable[
+            TensorProductInstruction | tuple[int, int, int]
+        ]
+        | None = None,
+        *,
+        internal_weights: bool = True,
+        shared_weights: bool = True,
+    ):
+        super().__init__(
+            in1_type,
+            in2_type,
+            out_type,
+            instructions,
+            connection_mode="uvw",
+            internal_weights=internal_weights,
+            shared_weights=shared_weights,
+        )
 
 
 class FullTensorProduct(nn.Module):
