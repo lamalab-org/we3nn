@@ -1011,15 +1011,25 @@ class _MultiplicityTensorProductBlock(nn.Module):
             self.output.size,
             self.left.size,
         )
-        values = base.unsqueeze(-5).unsqueeze(-5).expand(
-            *leading_shape,
-            output_multiplicity,
-            left_multiplicity,
-            right_multiplicity,
-            coupling_numel,
-            self.output.size,
-            self.left.size,
-        )
+        if self.connection_mode == "uvu":
+            values = base.unsqueeze(-5).expand(
+                *leading_shape,
+                left_multiplicity,
+                right_multiplicity,
+                coupling_numel,
+                self.output.size,
+                self.left.size,
+            )
+        else:
+            values = base.unsqueeze(-5).unsqueeze(-5).expand(
+                *leading_shape,
+                output_multiplicity,
+                left_multiplicity,
+                right_multiplicity,
+                coupling_numel,
+                self.output.size,
+                self.left.size,
+            )
         values = values.reshape(
             *leading_shape,
             self.weight_numel,
@@ -1030,17 +1040,29 @@ class _MultiplicityTensorProductBlock(nn.Module):
 
         output_coordinates = self.output_pack.coordinate_indices(right.device)
         input_coordinates = self.left_pack.coordinate_indices(right.device)
-        matrix_indices = (
-            output_coordinates[:, None, None, None, :, None] * input_size
-            + input_coordinates[None, :, None, None, None, :]
-        ).expand(
-            output_multiplicity,
-            left_multiplicity,
-            right_multiplicity,
-            coupling_numel,
-            self.output.size,
-            self.left.size,
-        )
+        if self.connection_mode == "uvu":
+            matrix_indices = (
+                output_coordinates[:, None, None, :, None] * input_size
+                + input_coordinates[:, None, None, None, :]
+            ).expand(
+                left_multiplicity,
+                right_multiplicity,
+                coupling_numel,
+                self.output.size,
+                self.left.size,
+            )
+        else:
+            matrix_indices = (
+                output_coordinates[:, None, None, None, :, None] * input_size
+                + input_coordinates[None, :, None, None, None, :]
+            ).expand(
+                output_multiplicity,
+                left_multiplicity,
+                right_multiplicity,
+                coupling_numel,
+                self.output.size,
+                self.left.size,
+            )
         matrix_indices = matrix_indices.reshape(
             self.weight_numel, self.output.size * self.left.size
         )

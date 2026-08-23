@@ -33,6 +33,12 @@ class KernelTensorProduct(nn.Module):
     ``(..., weight_numel)`` matching the inputs' leading axes. Shared weights
     have shape ``(weight_numel,)``.
 
+    ``connection_mode="uvu"`` preserves the first-input occurrence index in
+    the output and stores reduced weights over ``(u, v, coupling)``. Matching
+    input/output multiplicities are required for every compatible grouped
+    representation triple. The default ``"uvw"`` retains fully connected
+    output-channel mixing and historical external-weight ordering.
+
     This separation is useful for steerable kernels: angular/filter features
     determine the fixed equivariant basis while a radial network predicts the
     reduced coefficients. :meth:`sample_kernel_basis` expands filter samples
@@ -50,7 +56,15 @@ class KernelTensorProduct(nn.Module):
     output is typed. Reduced weights are invariant scalars and need no wrapper.
     """
 
-    def __init__(self, rep_in: FieldType | Representation, rep_filter: FieldType | Representation, rep_out: FieldType | Representation, *, shared_weights: bool = False):
+    def __init__(
+        self,
+        rep_in: FieldType | Representation,
+        rep_filter: FieldType | Representation,
+        rep_out: FieldType | Representation,
+        *,
+        shared_weights: bool = False,
+        connection_mode: str = "uvw",
+    ):
         super().__init__()
         if isinstance(rep_in, Representation):
             rep_in = as_field_type(rep_in)
@@ -65,6 +79,7 @@ class KernelTensorProduct(nn.Module):
             rep_in,
             rep_filter,
             rep_out,
+            connection_mode=connection_mode,
             internal_weights=False,
             shared_weights=shared_weights,
         )
@@ -72,6 +87,7 @@ class KernelTensorProduct(nn.Module):
         self.in1_type = rep_in
         self.in2_type = rep_filter
         self.out_type = rep_out
+        self.connection_mode = connection_mode
 
     def forward(
         self,
@@ -193,6 +209,8 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         harmonics: Optional evaluator when ``rep_filter`` is supplied as a
             representation rather than as a module.
         shared_weights: Share one reduced-weight vector over leading axes.
+        connection_mode: ``"uvw"`` for fully connected output multiplicities
+            or ``"uvu"`` for occurrence-paired input/output multiplicities.
 
     The output is a :class:`RepresentationTensor` when the feature input is
     typed; representation mismatches are rejected before harmonic contraction.
@@ -206,6 +224,7 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         *,
         harmonics: RestrictedSphericalHarmonics | None = None,
         shared_weights: bool = False,
+        connection_mode: str = "uvw",
     ):
         if isinstance(rep_filter, RestrictedSphericalHarmonics):
             if harmonics is not None:
@@ -243,6 +262,7 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
             rep_filter,
             rep_out,
             shared_weights=shared_weights,
+            connection_mode=connection_mode,
         )
         self.harmonics = harmonics
         self.embedding = harmonics.embedding if harmonics is not None else None
