@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from we3nn import gspaces, nn
+from we3nn import RestrictedSphericalHarmonics, RepresentationTensor, gspaces, nn
 from we3nn.clebsch_gordan import full_coupling_basis
 
 
@@ -368,3 +368,159 @@ def test_uvu_analytic_regular_paths_are_equivariant(regular_position):
         )
         expected = types[2].transform_fibers(output, element)
         torch.testing.assert_close(actual, expected, atol=5e-10, rtol=5e-10)
+
+
+@pytest.mark.parametrize("shared_weights", [True, False])
+def test_uvu_kernel_forward_basis_and_gradients_match_field_path_oracle(shared_weights):
+    torch.manual_seed(113)
+    space = _space("dihedral", 6)
+    e1, e2 = _e(space, 1), _e(space, 2)
+    feature_type = nn.FieldType(space, [e1] * 3)
+    filter_type = nn.FieldType(space, [e1] * 2)
+    output_type = nn.FieldType(space, [e2] * 3)
+    kernel = nn.KernelTensorProduct(
+        feature_type,
+        filter_type,
+        output_type,
+        connection_mode="uvu",
+        shared_weights=shared_weights,
+    ).double()
+    reference = _explicit_reference(kernel.tensor_product)
+    features = torch.randn(4, feature_type.size, dtype=torch.float64, requires_grad=True)
+    filters = torch.randn(4, filter_type.size, dtype=torch.float64, requires_grad=True)
+    weight_shape = (kernel.weight_numel,) if shared_weights else (4, kernel.weight_numel)
+    weights = torch.randn(*weight_shape, dtype=torch.float64, requires_grad=True)
+    features_ref = features.detach().clone().requires_grad_()
+    filters_ref = filters.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+
+    actual = kernel(features, filters, weights)
+    expected = reference(features_ref, filters_ref, weights_ref)
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    sampled = kernel.sample_kernel_basis(filters)
+    assert sampled.shape == (4, kernel.weight_numel, output_type.size, feature_type.size)
+    basis_output = torch.einsum("...poi,...i,...p->...o", sampled, features, weights)
+    torch.testing.assert_close(basis_output, actual, atol=3e-12, rtol=3e-12)
+
+    (actual.square().sum() + basis_output.square().sum()).backward()
+    (2.0 * expected.square().sum()).backward()
+    for new, old in (
+        (features, features_ref),
+        (filters, filters_ref),
+        (weights, weights_ref),
+    ):
+        torch.testing.assert_close(new.grad, old.grad, atol=8e-11, rtol=8e-11)
+
+    detached_output = actual.detach()
+    for element in space.fibergroup.elements:
+        transformed = kernel(
+            feature_type.transform_fibers(features.detach(), element),
+            filter_type.transform_fibers(filters.detach(), element),
+            weights.detach(),
+        )
+        torch.testing.assert_close(
+            transformed,
+            output_type.transform_fibers(detached_output, element),
+            atol=4e-10,
+            rtol=4e-10,
+        )
+
+
+@pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
+def test_uvu_regular_kernel_basis_reconstructs_analytic_forward(regular_position):
+    space = _space("dihedral", 5)
+    vector, regular = _e(space, 1), space.regular_repr
+    feature_rep = regular if regular_position in {"left", "all"} else vector
+    filter_rep = regular if regular_position in {"right", "all"} else vector
+    output_rep = regular if regular_position in {"output", "all"} else vector
+    feature_type = nn.FieldType(space, [feature_rep] * 2)
+    filter_type = nn.FieldType(space, [filter_rep] * 2)
+    output_type = nn.FieldType(space, [output_rep] * 2)
+    kernel = nn.KernelTensorProduct(
+        feature_type, filter_type, output_type, connection_mode="uvu"
+    ).double()
+    features = torch.randn(3, feature_type.size, dtype=torch.float64)
+    filters = torch.randn(3, filter_type.size, dtype=torch.float64)
+    weights = torch.randn(3, kernel.weight_numel, dtype=torch.float64)
+    basis = kernel.sample_kernel_basis(filters)
+    torch.testing.assert_close(
+        torch.einsum("...poi,...i,...p->...o", basis, features, weights),
+        kernel(features, filters, weights),
+        atol=8e-12,
+        rtol=8e-12,
+    )
+
+
+def test_uvu_spherical_kernel_from_points_basis_gradients_and_equivariance():
+    torch.manual_seed(127)
+    group = gspaces.flipRot2dOnR2(6).fibergroup
+    space = gspaces.no_base_space(group)
+    harmonics = RestrictedSphericalHarmonics(
+        group, degrees=[0, 1, 2], normalization="component"
+    )
+    e1 = _e(space, 1)
+    feature_type = nn.FieldType(space, [e1] * 2)
+    output_type = nn.FieldType(space, [e1] * 2)
+    kernel = nn.SphericalKernelTensorProduct(
+        feature_type,
+        harmonics,
+        output_type,
+        connection_mode="uvu",
+    ).double()
+    reference = _explicit_reference(kernel.tensor_product)
+    features = torch.randn(3, feature_type.size, dtype=torch.float64, requires_grad=True)
+    points = torch.randn(3, 3, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(3, kernel.weight_numel, dtype=torch.float64, requires_grad=True)
+    features_ref = features.detach().clone().requires_grad_()
+    points_ref = points.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+
+    actual = kernel.forward_from_points(features, points, weights)
+    expected = reference(features_ref, harmonics(points_ref), weights_ref)
+    torch.testing.assert_close(actual, expected, atol=5e-12, rtol=5e-12)
+    basis = kernel.sample_kernel_basis(points)
+    from_basis = torch.einsum("...poi,...i,...p->...o", basis, features, weights)
+    torch.testing.assert_close(from_basis, actual, atol=5e-12, rtol=5e-12)
+    (actual.square().sum() + from_basis.square().sum()).backward()
+    (2.0 * expected.square().sum()).backward()
+    for new, old in (
+        (features, features_ref),
+        (points, points_ref),
+        (weights, weights_ref),
+    ):
+        torch.testing.assert_close(new.grad, old.grad, atol=2e-10, rtol=2e-10)
+
+    actual = actual.detach()
+    for element in group.elements:
+        matrix = harmonics.embedding.matrix(element, dtype=torch.float64)
+        transformed = kernel.forward_from_points(
+            feature_type.transform_fibers(features.detach(), element),
+            points.detach() @ matrix.T,
+            weights.detach(),
+        )
+        torch.testing.assert_close(
+            transformed,
+            output_type.transform_fibers(actual, element),
+            atol=3e-6,
+            rtol=3e-6,
+        )
+
+
+def test_uvu_preserves_representation_tensor_type_safety():
+    space = _space("dihedral", 6)
+    e1, e2 = _e(space, 1), _e(space, 2)
+    left_type = nn.FieldType(space, [e1] * 2)
+    right_type = nn.FieldType(space, [e1])
+    output_type = nn.FieldType(space, [e2] * 2)
+    module = nn.TensorProduct(left_type, right_type, output_type, connection_mode="uvu")
+    output = module(
+        RepresentationTensor(torch.randn(3, left_type.size), left_type),
+        RepresentationTensor(torch.randn(3, right_type.size), right_type),
+    )
+    assert isinstance(output, RepresentationTensor)
+    assert output.field_type == output_type
+    with pytest.raises(TypeError, match="representation mismatch"):
+        module(
+            RepresentationTensor(torch.randn(3, left_type.size), output_type),
+            RepresentationTensor(torch.randn(3, right_type.size), right_type),
+        )
