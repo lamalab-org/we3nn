@@ -849,28 +849,57 @@ class _MultiplicityTensorProductBlock(nn.Module):
         if self.kind == "output_regular":
             left_transformed = self._inverse_transforms(left, self.left, "left_matrices")
             right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
-            equation = (
-                "muvab,...uqa,...vqb->...mq"
-                if shared else "...muvab,...uqa,...vqb->...mq"
-            )
+            if self.connection_mode == "uvu":
+                equation = (
+                    "uvab,...uqa,...vqb->...uq"
+                    if shared
+                    else "...uvab,...uqa,...vqb->...uq"
+                )
+            else:
+                equation = (
+                    "muvab,...uqa,...vqb->...mq"
+                    if shared
+                    else "...muvab,...uqa,...vqb->...mq"
+                )
             return torch.einsum(equation, coefficients, left_transformed, right_transformed) / order_scale
 
         output_matrices = self._matrices("output_matrices", left)
         if self.kind == "left_regular":
             right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
-            equation = (
-                "muvab,...vqb,...uq->...mqa"
-                if shared else "...muvab,...vqb,...uq->...mqa"
-            )
+            if self.connection_mode == "uvu":
+                equation = (
+                    "uvab,...vqb,...uq->...uqa"
+                    if shared
+                    else "...uvab,...vqb,...uq->...uqa"
+                )
+            else:
+                equation = (
+                    "muvab,...vqb,...uq->...mqa"
+                    if shared
+                    else "...muvab,...vqb,...uq->...mqa"
+                )
             intermediate = torch.einsum(equation, coefficients, right_transformed, left)
         else:
             left_transformed = self._inverse_transforms(left, self.left, "left_matrices")
-            equation = (
-                "muvab,...uqb,...vq->...mqa"
-                if shared else "...muvab,...uqb,...vq->...mqa"
-            )
+            if self.connection_mode == "uvu":
+                equation = (
+                    "uvab,...uqb,...vq->...uqa"
+                    if shared
+                    else "...uvab,...uqb,...vq->...uqa"
+                )
+            else:
+                equation = (
+                    "muvab,...uqb,...vq->...mqa"
+                    if shared
+                    else "...muvab,...uqb,...vq->...mqa"
+                )
             intermediate = torch.einsum(equation, coefficients, left_transformed, right)
-        return torch.einsum("qoa,...mqa->...mo", output_matrices, intermediate) / order_scale
+        output_equation = (
+            "qoa,...uqa->...uo"
+            if self.connection_mode == "uvu"
+            else "qoa,...mqa->...mo"
+        )
+        return torch.einsum(output_equation, output_matrices, intermediate) / order_scale
 
     def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         flat_value = value.reshape(*value.shape[:-2], -1)
