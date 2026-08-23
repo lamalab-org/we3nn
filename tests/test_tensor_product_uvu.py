@@ -524,3 +524,47 @@ def test_uvu_preserves_representation_tensor_type_safety():
             RepresentationTensor(torch.randn(3, left_type.size), output_type),
             RepresentationTensor(torch.randn(3, right_type.size), right_type),
         )
+
+
+def test_uvu_128_channel_kernel_scale_has_linear_weights_and_one_block():
+    space = _space("dihedral", 6)
+    e1, e2 = _e(space, 1), _e(space, 2)
+    channels = 128
+    left_type = nn.FieldType(space, [e1] * channels)
+    filter_type = nn.FieldType(space, [e1])
+    output_type = nn.FieldType(space, [e2] * channels)
+    product = nn.TensorProduct(
+        left_type,
+        filter_type,
+        output_type,
+        connection_mode="uvu",
+    )
+    coupling_count = full_coupling_basis(e1, e1, e2).shape[0]
+    assert product.weight_numel == channels * coupling_count
+    assert len(product.blocks) == 1
+    assert len(product.paths) == 0
+    assert len(product.instructions) == channels
+    assert sum(1 for _ in product.modules()) == 4
+    assert sum(
+        name.endswith("coupling_basis") and buffer.numel() > 0
+        for name, buffer in product.named_buffers()
+    ) == 1
+    assert sum(parameter.numel() for parameter in product.parameters()) == product.weight_numel
+
+    left = torch.randn(4, left_type.size, requires_grad=True)
+    filters = torch.randn(4, filter_type.size, requires_grad=True)
+    output = product(left, filters)
+    assert output.shape == (4, output_type.size)
+    output.square().mean().backward()
+    assert left.grad is not None
+    assert filters.grad is not None
+    assert product.blocks[0].weight.grad is not None
+
+    fully_mixed = nn.TensorProduct(
+        left_type,
+        filter_type,
+        output_type,
+        internal_weights=False,
+    )
+    assert fully_mixed.weight_numel == channels**2 * coupling_count
+    assert fully_mixed.weight_numel == channels * product.weight_numel
