@@ -77,6 +77,11 @@ def _cg_chunk_plan(
     if budget <= 0:
         raise ValueError("CG intermediate memory budget must be positive")
     element_factor = coupling_multiplicity * output_size * element_size
+    if budget < element_factor:
+        raise ValueError(
+            f"CG intermediate memory budget ({budget} bytes) is smaller than "
+            f"one coupled sample ({element_factor} bytes)"
+        )
     unchunked = batch_size * left_multiplicity * right_multiplicity * element_factor
     if unchunked <= budget:
         return _CGChunkPlan(

@@ -39,6 +39,27 @@ def _parameter_gradients(module):
     return torch.cat([parameter.grad.reshape(-1) for parameter in module.parameters()])
 
 
+def test_cg_chunk_plan_rejects_budget_below_one_coupled_sample():
+    arguments = {
+        "batch_size": 5,
+        "left_multiplicity": 3,
+        "right_multiplicity": 4,
+        "coupling_multiplicity": 1,
+        "output_size": 2,
+        "element_size": 4,
+    }
+    with pytest.raises(ValueError, match=r"7 bytes.*one coupled sample \(8 bytes\)"):
+        tensor_product_module._cg_chunk_plan(
+            **arguments, max_intermediate_bytes=7
+        )
+
+    plan = tensor_product_module._cg_chunk_plan(
+        **arguments, max_intermediate_bytes=8
+    )
+    assert plan.estimated_chunk_bytes == 8
+    assert plan.estimated_chunk_bytes <= plan.max_intermediate_bytes
+
+
 @pytest.mark.parametrize(
     "kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)]
 )

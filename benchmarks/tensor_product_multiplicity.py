@@ -13,12 +13,11 @@ import argparse
 import gc
 import importlib
 import math
-import resource
-import sys
 import time
 import tracemalloc
 import warnings
 
+import psutil
 import torch
 
 from we3nn import gspaces, nn
@@ -44,9 +43,12 @@ def median_milliseconds(function, repeats: int) -> float:
     return float(torch.tensor(samples).median())
 
 
-def process_peak_rss_bytes() -> int:
-    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    return value if sys.platform == "darwin" else value * 1024
+_PROCESS = psutil.Process()
+
+
+def process_current_rss_bytes() -> int:
+    """Return current resident memory, not the process lifetime high-water mark."""
+    return int(_PROCESS.memory_info().rss)
 
 
 def construct(
@@ -153,12 +155,12 @@ def benchmark(
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     synchronize()
-    rss_before = process_peak_rss_bytes()
+    rss_before = process_current_rss_bytes()
     start = time.perf_counter_ns()
     module = construct(multiplicity, legacy=legacy, device=device)
     synchronize()
     construction_ms = (time.perf_counter_ns() - start) / 1e6
-    rss_after_construction = process_peak_rss_bytes()
+    rss_after_construction = process_current_rss_bytes()
     _, peak_python = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     constructor_device_peak = (
@@ -210,8 +212,11 @@ def benchmark(
         "constructor_device_peak_mib": constructor_device_peak / 2**20,
         "forward_device_peak_mib": forward_device_peak / 2**20,
         "forward_backward_device_peak_mib": forward_backward_device_peak / 2**20,
-        "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
-        "constructor_rss_delta_mib": max(0, rss_after_construction - rss_before) / 2**20,
+        "process_current_rss_mib": process_current_rss_bytes() / 2**20,
+        "constructor_retained_rss_delta_mib": (
+            rss_after_construction - rss_before
+        )
+        / 2**20,
         "tensor_storage_mib": tensor_storage / 2**20,
         "parameter_mib": storage["parameter_bytes"] / 2**20,
         "parameter_elements": storage["parameter_elements"],
@@ -241,7 +246,7 @@ def benchmark_external_constructor(
     """Measure metadata construction without allocating the O(m^3) weights."""
     gc.collect()
     tracemalloc.start()
-    rss_before = process_peak_rss_bytes()
+    rss_before = process_current_rss_bytes()
     start = time.perf_counter_ns()
     module = construct(
         multiplicity,
@@ -251,7 +256,7 @@ def benchmark_external_constructor(
     )
     synchronize()
     construction_ms = (time.perf_counter_ns() - start) / 1e6
-    rss_after = process_peak_rss_bytes()
+    rss_after = process_current_rss_bytes()
     _, peak_python = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     storage = storage_statistics(module)
@@ -265,8 +270,8 @@ def benchmark_external_constructor(
         "constructor_device_peak_mib": 0.0,
         "forward_device_peak_mib": float("nan"),
         "forward_backward_device_peak_mib": float("nan"),
-        "process_peak_rss_mib": rss_after / 2**20,
-        "constructor_rss_delta_mib": max(0, rss_after - rss_before) / 2**20,
+        "process_current_rss_mib": rss_after / 2**20,
+        "constructor_retained_rss_delta_mib": (rss_after - rss_before) / 2**20,
         "tensor_storage_mib": (storage["parameter_bytes"] + storage["buffer_bytes"]) / 2**20,
         "parameter_mib": storage["parameter_bytes"] / 2**20,
         "parameter_elements": storage["parameter_elements"],
@@ -443,7 +448,7 @@ def benchmark_edge_mode(
         "forward_backward_ms": forward_backward_ms,
         "cuda_allocated_peak_mib": allocated_peak / 2**20,
         "cuda_reserved_peak_mib": reserved_peak / 2**20,
-        "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
+        "process_current_rss_mib": process_current_rss_bytes() / 2**20,
     }
 
 
@@ -479,7 +484,8 @@ def main() -> None:
     print(
         "implementation,m,constructor_ms,forward_ms,forward_backward_ms,"
         "python_peak_mib,constructor_device_peak_mib,forward_device_peak_mib,"
-        "forward_backward_device_peak_mib,process_peak_rss_mib,constructor_rss_delta_mib,"
+        "forward_backward_device_peak_mib,process_current_rss_mib,"
+        "constructor_retained_rss_delta_mib,"
         "tensor_storage_mib,parameter_mib,parameter_elements,persistent_buffer_mib,"
         "legacy_index_mib,registered_buffer_elements,layout_metadata_elements,"
         "grouped_cg_intermediate_mib,"
@@ -527,7 +533,7 @@ def main() -> None:
         "per_edge_external_weight_mib,unbounded_cg_temporary_mib,"
         "bounded_cg_temporary_mib,chunk_contractions,batch_chunk,left_chunk,right_chunk,"
         "forward_ms,forward_backward_ms,cuda_allocated_peak_mib,"
-        "cuda_reserved_peak_mib,process_peak_rss_mib"
+        "cuda_reserved_peak_mib,process_current_rss_mib"
     )
     for edge_count in args.edge_counts:
         estimate = message_passing_estimate(
@@ -548,7 +554,7 @@ def main() -> None:
                     "forward_backward_ms": float("nan"),
                     "cuda_allocated_peak_mib": float("nan"),
                     "cuda_reserved_peak_mib": float("nan"),
-                    "process_peak_rss_mib": process_peak_rss_bytes() / 2**20,
+                    "process_current_rss_mib": process_current_rss_bytes() / 2**20,
                 }
                 if mode_budget is None
                 else benchmark_edge_mode(
