@@ -253,3 +253,118 @@ def test_uvu_cg_equivariance(kind, n):
         )
         expected = output_type.transform_fibers(output, element)
         torch.testing.assert_close(actual, expected, atol=3e-10, rtol=3e-10)
+
+
+@pytest.mark.parametrize(
+    "kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)]
+)
+@pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
+def test_uvu_analytic_regular_paths_match_explicit_reference_and_gradients(
+    kind, n, regular_position
+):
+    torch.manual_seed(107)
+    space = _space(kind, n)
+    vector, regular = _e(space, 1), space.regular_repr
+    left_rep = regular if regular_position in {"left", "all"} else vector
+    right_rep = regular if regular_position in {"right", "all"} else vector
+    output_rep = regular if regular_position in {"output", "all"} else vector
+    types = (
+        nn.FieldType(space, [left_rep] * 2),
+        nn.FieldType(space, [right_rep] * 2),
+        nn.FieldType(space, [output_rep] * 2),
+    )
+    grouped = nn.TensorProduct(
+        *types,
+        connection_mode="uvu",
+        internal_weights=False,
+        shared_weights=False,
+    ).double()
+    assert len(grouped.blocks) == 1
+    assert grouped.blocks[0].kind == (
+        "output_regular"
+        if regular_position in {"output", "all"}
+        else f"{regular_position}_regular"
+    )
+    left = torch.randn(3, types[0].size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(3, types[1].size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(3, grouped.weight_numel, dtype=torch.float64, requires_grad=True)
+    _compare_external_with_reference(grouped, left, right, weights)
+
+
+@pytest.mark.parametrize("shared_weights", [True, False])
+def test_uvu_all_regular_shared_and_per_sample_weights(shared_weights):
+    space = _space("dihedral", 6)
+    regular = space.regular_repr
+    type_ = nn.FieldType(space, [regular] * 2)
+    grouped = nn.TensorProduct(
+        type_,
+        type_,
+        type_,
+        connection_mode="uvu",
+        internal_weights=False,
+        shared_weights=shared_weights,
+    ).double()
+    left = torch.randn(2, type_.size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(2, type_.size, dtype=torch.float64, requires_grad=True)
+    shape = (grouped.weight_numel,) if shared_weights else (2, grouped.weight_numel)
+    weights = torch.randn(*shape, dtype=torch.float64, requires_grad=True)
+    _compare_external_with_reference(grouped, left, right, weights)
+
+
+def test_uvu_internal_regular_weights_and_gradients_match_reference():
+    torch.manual_seed(109)
+    space = _space("dihedral", 5)
+    regular = space.regular_repr
+    type_ = nn.FieldType(space, [regular] * 2)
+    grouped = nn.TensorProduct(type_, type_, type_, connection_mode="uvu").double()
+    reference = nn.TensorProduct(
+        type_,
+        type_,
+        type_,
+        instructions=[(p.i_in1, p.i_in2, p.i_out) for p in grouped.instructions],
+    ).double()
+    flattened = torch.cat([block.weight.detach().reshape(-1) for block in grouped.blocks])
+    offset = 0
+    with torch.no_grad():
+        for path in reference.paths:
+            count = path.weight_numel
+            path.weight.copy_(flattened[offset : offset + count].reshape(path.weight_shape))
+            offset += count
+    left = torch.randn(2, type_.size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(2, type_.size, dtype=torch.float64, requires_grad=True)
+    left_ref = left.detach().clone().requires_grad_()
+    right_ref = right.detach().clone().requires_grad_()
+    actual, expected = grouped(left, right), reference(left_ref, right_ref)
+    torch.testing.assert_close(actual, expected, atol=5e-12, rtol=5e-12)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    torch.testing.assert_close(left.grad, left_ref.grad, atol=8e-11, rtol=8e-11)
+    torch.testing.assert_close(right.grad, right_ref.grad, atol=8e-11, rtol=8e-11)
+    grouped_grad = torch.cat([block.weight.grad.reshape(-1) for block in grouped.blocks])
+    reference_grad = torch.cat([path.weight.grad.reshape(-1) for path in reference.paths])
+    torch.testing.assert_close(grouped_grad, reference_grad, atol=8e-11, rtol=8e-11)
+
+
+@pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
+def test_uvu_analytic_regular_paths_are_equivariant(regular_position):
+    space = _space("dihedral", 5)
+    vector, regular = _e(space, 1), space.regular_repr
+    left_rep = regular if regular_position in {"left", "all"} else vector
+    right_rep = regular if regular_position in {"right", "all"} else vector
+    output_rep = regular if regular_position in {"output", "all"} else vector
+    types = (
+        nn.FieldType(space, [left_rep] * 2),
+        nn.FieldType(space, [right_rep] * 2),
+        nn.FieldType(space, [output_rep] * 2),
+    )
+    module = nn.TensorProduct(*types, connection_mode="uvu").double()
+    left = torch.randn(2, types[0].size, dtype=torch.float64)
+    right = torch.randn(2, types[1].size, dtype=torch.float64)
+    output = module(left, right)
+    for element in space.fibergroup.elements:
+        actual = module(
+            types[0].transform_fibers(left, element),
+            types[1].transform_fibers(right, element),
+        )
+        expected = types[2].transform_fibers(output, element)
+        torch.testing.assert_close(actual, expected, atol=5e-10, rtol=5e-10)
