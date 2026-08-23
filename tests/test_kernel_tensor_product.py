@@ -204,7 +204,14 @@ def test_grouped_spherical_kernel_matches_legacy_from_points_and_gradients(monke
     tensor_product_module = __import__(
         "we3nn.nn.tensor_product", fromlist=["_CG_MAX_INTERMEDIATE_BYTES"]
     )
-    monkeypatch.setattr(tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", 1)
+    minimum_valid_budget = max(
+        block.coupling_shape[0] * block.output.size * 8
+        for block in grouped.tensor_product.blocks
+        if block.kind == "cg"
+    )
+    monkeypatch.setattr(
+        tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", minimum_valid_budget
+    )
     actual = grouped.forward_from_points(features_new, points_new, weights_new)
     expected = legacy.forward_from_points(features_old, points_old, weights_old)
     torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
