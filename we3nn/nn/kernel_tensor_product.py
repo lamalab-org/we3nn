@@ -39,6 +39,11 @@ class KernelTensorProduct(nn.Module):
     into matrices with shape
     ``(..., weight_numel, output_dim, input_dim)``.
 
+    Both :meth:`forward` and :meth:`sample_kernel_basis` use the grouped
+    multiplicity execution plan owned by the underlying :class:`TensorProduct`.
+    Sampling iterates over unique representation triples, not logical field
+    triples, while preserving the historical flattened reduced-weight order.
+
     Raw feature/filter tensors emit
     :class:`MissingRepresentationMetadataWarning`. If both are
     :class:`RepresentationTensor` objects, metadata is validated and the
@@ -104,6 +109,19 @@ class KernelTensorProduct(nn.Module):
             self.rep_out.size,
             self.rep_in.size,
         )
+        if self.tensor_product._grouped:
+            kernels_flat = kernels.flatten(-2)
+            for block in self.tensor_product.blocks:
+                weight_indices, matrix_indices, values = block.kernel_basis_entries(
+                    filter_features, self.rep_in.size
+                )
+                kernels_flat[
+                    ...,
+                    weight_indices[:, None],
+                    matrix_indices,
+                ] = values
+            return kernels
+
         weight_offset = 0
         for instruction, path in zip(
             self.tensor_product.instructions, self.tensor_product.paths
