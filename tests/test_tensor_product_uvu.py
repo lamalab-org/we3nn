@@ -218,7 +218,26 @@ def test_uvu_memory_bounded_cg_path_matches_reference(monkeypatch):
     tensor_product_module = __import__(
         "we3nn.nn.tensor_product", fromlist=["_CG_MAX_INTERMEDIATE_BYTES"]
     )
-    monkeypatch.setattr(tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", 8)
+    block = grouped.blocks[0]
+    minimum_valid_budget = (
+        block.coupling_shape[0] * block.output.size * torch.float64.itemsize
+    )
+    plan = tensor_product_module._cg_chunk_plan(
+        batch_size=3,
+        left_multiplicity=block.left_pack.multiplicity,
+        right_multiplicity=block.right_pack.multiplicity,
+        coupling_multiplicity=block.coupling_shape[0],
+        output_size=block.output.size,
+        element_size=torch.float64.itemsize,
+        max_intermediate_bytes=minimum_valid_budget,
+    )
+    assert plan.chunked
+    assert plan.estimated_chunk_bytes <= minimum_valid_budget
+    monkeypatch.setattr(
+        tensor_product_module,
+        "_CG_MAX_INTERMEDIATE_BYTES",
+        minimum_valid_budget,
+    )
     left = torch.randn(3, types[0].size, dtype=torch.float64, requires_grad=True)
     right = torch.randn(3, types[1].size, dtype=torch.float64, requires_grad=True)
     weights = torch.randn(3, grouped.weight_numel, dtype=torch.float64, requires_grad=True)
