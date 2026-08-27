@@ -300,12 +300,20 @@ def test_custom_regular_subchunks_keep_analytic_execution():
 def test_kernel_custom_subchunks_forward_basis_and_gradients_match_oracle():
     torch.manual_seed(179)
     space = _space()
-    types, left_specs, output_specs, instructions = _mixed_subchunk_case(space)
+    types, left_specs, output_specs, _ = _mixed_subchunk_case(space)
+    filter_specs = [_spec(1), _spec(0)]
+    remapped_instructions = [
+        nn.TensorProductBlockInstruction(0, 1, 0, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(1, 1, 1, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(2, 0, 0, connection_mode="uvw"),
+        nn.TensorProductBlockInstruction(2, 0, 1, connection_mode="uvw"),
+    ]
     kernel = nn.KernelTensorProduct(
         *types,
         in1_chunks=left_specs,
+        in2_chunks=filter_specs,
         out_chunks=output_specs,
-        block_instructions=instructions,
+        block_instructions=remapped_instructions,
     ).double()
     reference = _explicit_reference(kernel.tensor_product)
     features = torch.randn(2, 3, types[0].size, dtype=torch.float64, requires_grad=True)
@@ -331,6 +339,7 @@ def test_kernel_custom_subchunks_forward_basis_and_gradients_match_oracle():
     ):
         torch.testing.assert_close(new.grad, old.grad, atol=8e-11, rtol=8e-11)
     assert kernel.in1_chunks == kernel.tensor_product.in1_chunks
+    assert [chunk.field_indices for chunk in kernel.in2_chunks] == [(1,), (0,)]
     assert kernel.out_chunks == kernel.tensor_product.out_chunks
 
 
