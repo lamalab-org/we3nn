@@ -205,6 +205,25 @@ class TensorProductInstruction:
 
 
 @dataclass(frozen=True)
+class MultiplicityChunkSpec:
+    """User-defined partition entry containing only ``FieldType`` indices.
+
+    The tensor-product compiler derives the representation and flattened
+    coordinate starts from the selected fields. The supplied field order is
+    preserved and defines the local multiplicity-axis order.
+    """
+
+    field_indices: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            normalized = tuple(self.field_indices)
+        except TypeError as error:
+            raise TypeError("field_indices must be an iterable of integers") from error
+        object.__setattr__(self, "field_indices", normalized)
+
+
+@dataclass(frozen=True)
 class MultiplicityChunk:
     """Read-only descriptor for equal-representation field occurrences.
 
@@ -292,7 +311,9 @@ def _contiguous_field_slice(starts: tuple[int, ...], field_size: int) -> slice |
     return None
 
 
-def _multiplicity_chunks(field_type: FieldType) -> tuple[MultiplicityChunk, ...]:
+def _automatic_multiplicity_chunks(
+    field_type: FieldType,
+) -> tuple[MultiplicityChunk, ...]:
     """Group equal representations deterministically in first-encounter order."""
     grouped = defaultdict(lambda: ([], []))
     for field_index, (representation, start) in enumerate(
@@ -306,13 +327,84 @@ def _multiplicity_chunks(field_type: FieldType) -> tuple[MultiplicityChunk, ...]
     )
 
 
+def _compile_multiplicity_chunks(
+    field_type: FieldType,
+    specs: Iterable[MultiplicityChunkSpec] | None,
+    *,
+    label: str,
+) -> tuple[MultiplicityChunk, ...]:
+    """Compile and validate an ordered, exact partition of ``field_type``."""
+    if specs is None:
+        return _automatic_multiplicity_chunks(field_type)
+
+    normalized_specs = tuple(specs)
+    chunks = []
+    owners: dict[int, int] = {}
+    for spec_index, spec in enumerate(normalized_specs):
+        if not isinstance(spec, MultiplicityChunkSpec):
+            raise TypeError(
+                f"{label} chunk {spec_index} must be a MultiplicityChunkSpec"
+            )
+        indices = spec.field_indices
+        if not indices:
+            raise ValueError(f"{label} MultiplicityChunkSpec {spec_index} is empty")
+        local_seen = set()
+        for index in indices:
+            if type(index) is not int:
+                raise TypeError(
+                    f"{label} MultiplicityChunkSpec {spec_index} contains "
+                    f"noninteger field index {index!r}"
+                )
+            if not 0 <= index < len(field_type):
+                raise IndexError(
+                    f"{label} MultiplicityChunkSpec {spec_index} field index "
+                    f"{index} is outside [0, {len(field_type)})"
+                )
+            if index in local_seen:
+                raise ValueError(
+                    f"{label} MultiplicityChunkSpec {spec_index} repeats field {index}"
+                )
+            local_seen.add(index)
+            if index in owners:
+                raise ValueError(
+                    f"{label} field {index} belongs to both chunk "
+                    f"{owners[index]} and chunk {spec_index}"
+                )
+            owners[index] = spec_index
+
+        representation = field_type[indices[0]]
+        for index in indices[1:]:
+            selected = field_type[index]
+            if selected != representation:
+                raise ValueError(
+                    f"{label} MultiplicityChunkSpec {spec_index} mixes "
+                    f"representations: fields {indices[0]} and {index} carry "
+                    f"{representation.name} and {selected.name}"
+                )
+        chunks.append(
+            MultiplicityChunk(
+                representation,
+                indices,
+                tuple(field_type.fields_start[index] for index in indices),
+            )
+        )
+
+    missing = tuple(index for index in range(len(field_type)) if index not in owners)
+    if missing:
+        raise ValueError(
+            f"{label} chunk partition omits field indices {missing}; explicit "
+            "chunks must cover every field exactly once"
+        )
+    return tuple(chunks)
+
+
 def _representation_occurrences(
     field_type: FieldType,
 ) -> dict[Representation, tuple[tuple[int, ...], tuple[int, ...]]]:
     """Compatibility mapping backed by deterministic multiplicity chunks."""
     return {
         chunk.representation: (chunk.field_indices, chunk.coordinate_starts)
-        for chunk in _multiplicity_chunks(field_type)
+        for chunk in _automatic_multiplicity_chunks(field_type)
     }
 
 
