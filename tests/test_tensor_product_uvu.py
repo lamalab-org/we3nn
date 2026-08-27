@@ -71,6 +71,134 @@ def test_block_instruction_and_weight_layout_are_public_value_types():
         instruction.connection_mode = "uvw"
 
 
+def _mixed_types(space):
+    scalar, e1 = space.trivial_repr, _e(space, 1)
+    return (
+        nn.FieldType(space, [e1, scalar, e1, scalar, e1]),
+        nn.FieldType(space, [scalar, e1, scalar]),
+        nn.FieldType(space, [e1, scalar, e1, e1]),
+    )
+
+
+def _mixed_block_instructions():
+    return (
+        nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(1, 1, 0, connection_mode="uvw"),
+        nn.TensorProductBlockInstruction(0, 1, 1, connection_mode="uvw"),
+    )
+
+
+def test_mixed_block_instructions_match_explicit_paths_and_weight_layout():
+    torch.manual_seed(113)
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    grouped = nn.TensorProduct(
+        *types,
+        block_instructions=_mixed_block_instructions(),
+        internal_weights=False,
+        shared_weights=False,
+    ).double()
+
+    assert grouped.connection_mode is None
+    assert len(grouped.paths) == 0
+    assert len(grouped.blocks) == 3
+    assert [block.connection_mode for block in grouped.blocks] == ["uvu", "uvw", "uvw"]
+    assert [layout.weight_slice.start for layout in grouped.weight_layout] == [
+        0,
+        grouped.weight_layout[0].weight_slice.stop,
+        grouped.weight_layout[1].weight_slice.stop,
+    ]
+    assert grouped.weight_layout[-1].weight_slice.stop == grouped.weight_numel
+    assert [layout.shape for layout in grouped.weight_layout] == [
+        block.weight_shape for block in grouped.blocks
+    ]
+
+    left = torch.randn(2, 3, types[0].size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(2, 3, types[1].size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(
+        2, 3, grouped.weight_numel, dtype=torch.float64, requires_grad=True
+    )
+    _compare_external_with_reference(grouped, left, right, weights)
+
+
+def test_duplicate_block_instructions_remain_independent_blocks():
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    instruction = nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu")
+    product = nn.TensorProduct(
+        *types,
+        block_instructions=[instruction, instruction],
+        internal_weights=False,
+    )
+
+    assert len(product.blocks) == 2
+    assert len(product.paths) == 0
+    assert product.weight_layout[0].weight_slice.stop == product.weight_layout[1].weight_slice.start
+    assert product.weight_numel == 2 * product.blocks[0].weight_numel
+
+
+@pytest.mark.parametrize(
+    "block_instructions,connection_mode,error",
+    [
+        ([nn.TensorProductBlockInstruction(0, 0, 0, "bad")], "uvw", ValueError),
+        ([nn.TensorProductBlockInstruction(-1, 0, 0)], "uvw", IndexError),
+        ([nn.TensorProductBlockInstruction(0, 4, 0)], "uvw", IndexError),
+        ([nn.TensorProductBlockInstruction(0, 0, 7)], "uvw", IndexError),
+        ([nn.TensorProductBlockInstruction(0, 0, 0)], "uvu", ValueError),
+    ],
+)
+def test_block_instruction_validation(block_instructions, connection_mode, error):
+    space = _space("dihedral", 6)
+    with pytest.raises(error):
+        nn.TensorProduct(
+            *_mixed_types(space),
+            block_instructions=block_instructions,
+            connection_mode=connection_mode,
+        )
+
+
+def test_legacy_and_block_instructions_are_mutually_exclusive():
+    space = _space("dihedral", 6)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        nn.TensorProduct(
+            *_mixed_types(space),
+            instructions=[(0, 0, 0)],
+            block_instructions=[nn.TensorProductBlockInstruction(0, 0, 0)],
+        )
+
+
+def test_uvu_validation_is_local_to_selected_block():
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    product = nn.TensorProduct(
+        *types,
+        block_instructions=[
+            nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu")
+        ],
+    )
+    assert len(product.blocks) == 1
+
+    with pytest.raises(ValueError, match="matching output and left multiplicities"):
+        nn.TensorProduct(
+            *types,
+            block_instructions=[
+                nn.TensorProductBlockInstruction(1, 1, 0, connection_mode="uvu")
+            ],
+        )
+
+
+def test_zero_dimensional_block_coupling_is_rejected():
+    space = _space("dihedral", 6)
+    scalar, e1 = space.trivial_repr, _e(space, 1)
+    with pytest.raises(ValueError, match="no equivariant coupling"):
+        nn.TensorProduct(
+            nn.FieldType(space, [scalar]),
+            nn.FieldType(space, [scalar]),
+            nn.FieldType(space, [e1]),
+            block_instructions=[nn.TensorProductBlockInstruction(0, 0, 0)],
+        )
+
+
 @pytest.mark.parametrize(
     "kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)]
 )

@@ -541,8 +541,8 @@ class _LazyInstructionView(Sequence[TensorProductInstruction]):
         return self.parent[self.indices[index]]
 
 
-class _LazyUVUInstructions(Sequence[TensorProductInstruction]):
-    """Logical field paths for occurrence-paired grouped ``uvu`` blocks."""
+class _LazyGroupedInstructions(Sequence[TensorProductInstruction]):
+    """Logical field paths for grouped blocks with block-local wiring modes."""
 
     def __init__(self, blocks: Iterable[_MultiplicityTensorProductBlock]):
         self.descriptors = tuple(
@@ -551,12 +551,29 @@ class _LazyUVUInstructions(Sequence[TensorProductInstruction]):
                 block.right_fields,
                 block.output_fields,
                 block.coupling_shape,
+                block.connection_mode,
+                block.coupling,
+                block.has_weight,
+                block.path_weight,
             )
             for block in blocks
         )
         self._length = sum(
-            len(left_fields) * len(right_fields)
-            for left_fields, right_fields, _, _ in self.descriptors
+            (
+                len(output_fields) * len(left_fields) * len(right_fields)
+                if connection_mode == "uvw"
+                else len(left_fields) * len(right_fields)
+            )
+            for (
+                left_fields,
+                right_fields,
+                output_fields,
+                _,
+                connection_mode,
+                _,
+                _,
+                _,
+            ) in self.descriptors
         )
 
     def __len__(self) -> int:
@@ -564,21 +581,47 @@ class _LazyUVUInstructions(Sequence[TensorProductInstruction]):
 
     @staticmethod
     def _instruction(descriptor, local_index: int) -> TensorProductInstruction:
-        left_fields, right_fields, output_fields, coupling_shape = descriptor
+        (
+            left_fields,
+            right_fields,
+            output_fields,
+            coupling_shape,
+            connection_mode,
+            coupling,
+            has_weight,
+            path_weight,
+        ) = descriptor
         right_multiplicity = len(right_fields)
-        left_occurrence, right_occurrence = divmod(local_index, right_multiplicity)
+        if connection_mode == "uvw":
+            output_occurrence, remaining = divmod(
+                local_index, len(left_fields) * right_multiplicity
+            )
+            left_occurrence, right_occurrence = divmod(
+                remaining, right_multiplicity
+            )
+        else:
+            left_occurrence, right_occurrence = divmod(
+                local_index, right_multiplicity
+            )
+            output_occurrence = left_occurrence
         return TensorProductInstruction(
             i_in1=left_fields[left_occurrence],
             i_in2=right_fields[right_occurrence],
-            i_out=output_fields[left_occurrence],
-            connection_mode="uvu",
+            i_out=output_fields[output_occurrence],
+            coupling=coupling,
+            connection_mode=connection_mode,
+            has_weight=has_weight,
             path_shape=coupling_shape,
+            path_weight=path_weight,
         )
 
     def __iter__(self) -> Iterator[TensorProductInstruction]:
         for descriptor in self.descriptors:
-            left_fields, right_fields, _, _ = descriptor
-            for local_index in range(len(left_fields) * len(right_fields)):
+            left_fields, right_fields, output_fields, _, mode, *_ = descriptor
+            count = len(left_fields) * len(right_fields)
+            if mode == "uvw":
+                count *= len(output_fields)
+            for local_index in range(count):
                 yield self._instruction(descriptor, local_index)
 
     def __getitem__(self, index):
@@ -590,8 +633,10 @@ class _LazyUVUInstructions(Sequence[TensorProductInstruction]):
             raise IndexError(index)
         remaining = index
         for descriptor in self.descriptors:
-            left_fields, right_fields, _, _ = descriptor
+            left_fields, right_fields, output_fields, _, mode, *_ = descriptor
             count = len(left_fields) * len(right_fields)
+            if mode == "uvw":
+                count *= len(output_fields)
             if remaining < count:
                 return self._instruction(descriptor, remaining)
             remaining -= count
@@ -617,6 +662,9 @@ class _MultiplicityTensorProductBlock(nn.Module):
         internal_weights: bool,
         legacy_weight_offsets: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
         external_weight_slice: slice | None = None,
+        coupling: int | None = None,
+        has_weight: bool = True,
+        path_weight: float = 1.0,
     ):
         super().__init__()
         self.left = left
@@ -654,7 +702,23 @@ class _MultiplicityTensorProductBlock(nn.Module):
             self.left_pack.multiplicity,
             self.right_pack.multiplicity,
         )
+        self.full_coupling_shape = tuple(coupling_shape)
+        full_coupling_numel = math.prod(self.full_coupling_shape)
+        if full_coupling_numel == 0:
+            raise ValueError("the requested tensor-product block has no equivariant coupling")
+        self.coupling = coupling
+        if coupling is not None:
+            if not 0 <= int(coupling) < full_coupling_numel:
+                raise ValueError(
+                    f"coupling index {coupling} is outside [0, {full_coupling_numel})"
+                )
+            self.coupling = int(coupling)
+            coupling_shape = (1,)
         self.coupling_shape = tuple(coupling_shape)
+        self.has_weight = bool(has_weight)
+        self.path_weight = float(path_weight)
+        if not self.has_weight and self.coupling is None and full_coupling_numel != 1:
+            raise ValueError("an unweighted block instruction must select one coupling")
         output_multiplicity, left_multiplicity, right_multiplicity = (
             self.multiplicity_shape
         )
@@ -672,8 +736,8 @@ class _MultiplicityTensorProductBlock(nn.Module):
             raise ValueError(f"unsupported connection_mode={connection_mode!r}")
         self.multiplicity_weight_shape = multiplicity_weight_shape
         self.weight_shape = (*multiplicity_weight_shape, *self.coupling_shape)
-        self.weight_numel = math.prod(self.weight_shape)
-        if internal_weights:
+        self.weight_numel = math.prod(self.weight_shape) if self.has_weight else 0
+        if internal_weights and self.has_weight:
             self.weight = nn.Parameter(torch.empty(self.weight_shape))
         else:
             self.register_parameter("weight", None)
@@ -756,12 +820,31 @@ class _MultiplicityTensorProductBlock(nn.Module):
         return self.right_pack.pack(tensor, self.right_indices)
 
     def external_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if not self.has_weight:
+            raise RuntimeError("an unweighted block does not consume external weights")
         selected = (
             weight[..., self.external_weight_slice]
             if self.external_weight_slice is not None
             else self._select_legacy_weight(weight)
         )
         return selected.reshape(*weight.shape[:-1], *self.weight_shape)
+
+    def _expand_selected_coupling(self, coefficients: torch.Tensor) -> torch.Tensor:
+        if self.coupling is None:
+            return coefficients
+        leading_count = coefficients.ndim - len(self.weight_shape)
+        multiplicity_shape = coefficients.shape[
+            leading_count : leading_count + len(self.multiplicity_weight_shape)
+        ]
+        expanded_shape = (
+            *coefficients.shape[:leading_count],
+            *multiplicity_shape,
+            *self.full_coupling_shape,
+        )
+        expanded = coefficients.new_zeros(expanded_shape)
+        flattened = expanded.flatten(-len(self.full_coupling_shape))
+        flattened[..., self.coupling] = coefficients[..., 0]
+        return expanded
 
     def _legacy_index_chunks(
         self,
@@ -969,12 +1052,16 @@ class _MultiplicityTensorProductBlock(nn.Module):
         left = self.pack_left(left)
         right = self.pack_right(right)
         coefficients = self.weight if weight is None else weight
-        if coefficients is None:
+        if not self.has_weight:
+            coefficients = left.new_ones((*self.multiplicity_weight_shape, 1))
+        elif coefficients is None:
             raise RuntimeError("external tensor-product weights were not supplied")
         shared = coefficients.ndim == len(self.weight_shape)
+        coefficients = self._expand_selected_coupling(coefficients)
 
         if self.kind == "cg":
-            return self._forward_cg(left, right, coefficients, shared=shared)
+            value = self._forward_cg(left, right, coefficients, shared=shared)
+            return self.path_weight * value
 
         order_scale = math.sqrt(self.group.order())
         if self.kind == "output_regular":
@@ -992,7 +1079,10 @@ class _MultiplicityTensorProductBlock(nn.Module):
                     if shared
                     else "...muvab,...uqa,...vqb->...mq"
                 )
-            return torch.einsum(equation, coefficients, left_transformed, right_transformed) / order_scale
+            value = torch.einsum(
+                equation, coefficients, left_transformed, right_transformed
+            ) / order_scale
+            return self.path_weight * value
 
         output_matrices = self._matrices("output_matrices", left)
         if self.kind == "left_regular":
@@ -1030,7 +1120,8 @@ class _MultiplicityTensorProductBlock(nn.Module):
             if self.connection_mode == "uvu"
             else "qoa,...mqa->...mo"
         )
-        return torch.einsum(output_equation, output_matrices, intermediate) / order_scale
+        value = torch.einsum(output_equation, output_matrices, intermediate) / order_scale
+        return self.path_weight * value
 
     def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         flat_value = value.reshape(*value.shape[:-2], -1)
@@ -1045,6 +1136,10 @@ class _MultiplicityTensorProductBlock(nn.Module):
         self, filter_features: torch.Tensor, input_size: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return vectorized sparse entries for all weights in this block."""
+        if not self.has_weight:
+            raise RuntimeError(
+                "kernel-basis sampling does not support unweighted tensor-product blocks"
+            )
         right = self.pack_right(filter_features)
         leading_shape = right.shape[:-2]
         output_multiplicity, left_multiplicity, right_multiplicity = self.multiplicity_shape
@@ -1052,6 +1147,8 @@ class _MultiplicityTensorProductBlock(nn.Module):
 
         if self.kind == "cg":
             basis = self.coupling_basis.to(device=right.device, dtype=right.dtype)
+            if self.coupling is not None:
+                basis = basis[self.coupling : self.coupling + 1]
             base = torch.einsum("poij,...vj->...vpoi", basis, right)
         elif self.kind == "output_regular":
             right_transformed = self._inverse_transforms(right, self.right, "right_matrices")
@@ -1078,13 +1175,20 @@ class _MultiplicityTensorProductBlock(nn.Module):
                 "qoa,qbi,...vq->...vaboi", output_matrices, left_matrices, right
             ) / math.sqrt(self.group.order())
 
+        base_coupling_numel = (
+            coupling_numel
+            if self.kind == "cg"
+            else math.prod(self.full_coupling_shape)
+        )
         base = base.reshape(
             *leading_shape,
             right_multiplicity,
-            coupling_numel,
+            base_coupling_numel,
             self.output.size,
             self.left.size,
         )
+        if self.coupling is not None and self.kind != "cg":
+            base = base[..., self.coupling : self.coupling + 1, :, :]
         if self.connection_mode == "uvu":
             values = base.unsqueeze(-5).expand(
                 *leading_shape,
@@ -1109,6 +1213,7 @@ class _MultiplicityTensorProductBlock(nn.Module):
             self.weight_numel,
             self.output.size * self.left.size,
         )
+        values = self.path_weight * values
 
         weight_indices = self.legacy_weight_indices(right.device)
 
@@ -1394,6 +1499,7 @@ class TensorProduct(nn.Module):
         out_type: FieldType | Representation,
         instructions: Iterable[TensorProductInstruction | tuple[int, int, int]] | None = None,
         *,
+        block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
         connection_mode: str = "uvw",
         internal_weights: bool = True,
         shared_weights: bool = True,
@@ -1411,6 +1517,13 @@ class TensorProduct(nn.Module):
             raise ValueError("internal tensor-product weights must be shared")
         if connection_mode not in _CONNECTION_MODES:
             raise ValueError("connection_mode must be 'uvw' or 'uvu'")
+        if instructions is not None and block_instructions is not None:
+            raise ValueError("instructions and block_instructions are mutually exclusive")
+        if block_instructions is not None and connection_mode != "uvw":
+            raise ValueError(
+                "connection_mode is ambiguous with block_instructions; set the "
+                "mode independently on each TensorProductBlockInstruction"
+            )
         if instructions is not None and connection_mode != "uvw":
             raise ValueError(
                 "connection_mode applies to grouped TensorProduct with "
@@ -1421,10 +1534,100 @@ class TensorProduct(nn.Module):
         self.out_type = out_type
         self.internal_weights = bool(internal_weights)
         self.shared_weights = bool(shared_weights)
-        self.connection_mode = connection_mode
+        self.connection_mode = None if block_instructions is not None else connection_mode
         self.in1_chunks = _multiplicity_chunks(in1_type)
         self.in2_chunks = _multiplicity_chunks(in2_type)
         self.out_chunks = _multiplicity_chunks(out_type)
+        self._implicit_fully_connected = (
+            instructions is None and block_instructions is None
+        )
+
+        if block_instructions is not None:
+            normalized = tuple(block_instructions)
+            blocks = []
+            layouts = []
+            weight_offset = 0
+
+            def select_chunk(chunks, index, label):
+                if not isinstance(index, int) or not 0 <= index < len(chunks):
+                    raise IndexError(
+                        f"{label} chunk index {index!r} is outside [0, {len(chunks)})"
+                    )
+                return chunks[index]
+
+            for instruction_index, instruction in enumerate(normalized):
+                if not isinstance(instruction, TensorProductBlockInstruction):
+                    raise TypeError(
+                        "block_instructions must contain "
+                        "TensorProductBlockInstruction objects"
+                    )
+                if instruction.connection_mode not in _CONNECTION_MODES:
+                    raise ValueError(
+                        f"unsupported connection_mode={instruction.connection_mode!r}"
+                    )
+                left_chunk = select_chunk(
+                    self.in1_chunks, instruction.i_in1, "first-input"
+                )
+                right_chunk = select_chunk(
+                    self.in2_chunks, instruction.i_in2, "second-input"
+                )
+                output_chunk = select_chunk(
+                    self.out_chunks, instruction.i_out, "output"
+                )
+                left = left_chunk.representation
+                right = right_chunk.representation
+                output = output_chunk.representation
+                if not _coupling_dimension(left, right, output):
+                    raise ValueError(
+                        "block instruction has no equivariant coupling: "
+                        f"{left.name} x {right.name} -> {output.name}"
+                    )
+                block = _MultiplicityTensorProductBlock(
+                    left,
+                    right,
+                    output,
+                    left_chunk.coordinate_starts,
+                    right_chunk.coordinate_starts,
+                    output_chunk.coordinate_starts,
+                    left_chunk.field_indices,
+                    right_chunk.field_indices,
+                    output_chunk.field_indices,
+                    connection_mode=instruction.connection_mode,
+                    internal_weights=internal_weights,
+                    legacy_weight_offsets=None,
+                    external_weight_slice=(
+                        slice(weight_offset, weight_offset)
+                        if not instruction.has_weight
+                        else None
+                    ),
+                    coupling=instruction.coupling,
+                    has_weight=instruction.has_weight,
+                    path_weight=instruction.path_weight,
+                )
+                weight_slice = slice(
+                    weight_offset, weight_offset + block.weight_numel
+                )
+                block.external_weight_slice = weight_slice
+                weight_offset = weight_slice.stop
+                blocks.append(block)
+                layouts.append(
+                    TensorProductWeightLayout(
+                        instruction_index,
+                        instruction.connection_mode,
+                        block.weight_shape,
+                        weight_slice,
+                    )
+                )
+
+            self.blocks = nn.ModuleList(blocks)
+            self.paths = nn.ModuleList()
+            self.block_instructions = normalized
+            self.instructions = _LazyGroupedInstructions(blocks)
+            self.weight_layout = tuple(layouts)
+            self.weight_numel = weight_offset
+            self._coupling_dimensions = {}
+            self._grouped = True
+            return
 
         if instructions is None:
             left_occurrences = _representation_occurrences(in1_type)
@@ -1524,6 +1727,7 @@ class TensorProduct(nn.Module):
                 weight_numel += block.weight_numel
             self.blocks = nn.ModuleList(blocks)
             self.paths = nn.ModuleList()
+            self.block_instructions = None
             self.instructions = (
                 _LazyFullyConnectedInstructions(
                     in1_type,
@@ -1533,8 +1737,9 @@ class TensorProduct(nn.Module):
                     coupling_dimensions,
                 )
                 if connection_mode == "uvw"
-                else _LazyUVUInstructions(blocks)
+                else _LazyGroupedInstructions(blocks)
             )
+            self.weight_layout = None
             self.weight_numel = weight_numel
             self._coupling_dimensions = coupling_dimensions
             self._grouped = True
@@ -1589,6 +1794,8 @@ class TensorProduct(nn.Module):
             )
         self.paths = nn.ModuleList(paths)
         self.blocks = nn.ModuleList()
+        self.block_instructions = None
+        self.weight_layout = None
         self.instructions = tuple(normalized_instructions)
         self.weight_numel = sum(path.weight_numel for path in self.paths)
         self._grouped = False
@@ -1655,7 +1862,7 @@ class TensorProduct(nn.Module):
         error_msgs,
     ):
         """Migrate legacy fully-connected per-path state dictionaries."""
-        if self._grouped and self.connection_mode == "uvw":
+        if self._implicit_fully_connected and self.connection_mode == "uvw":
             legacy_prefix = f"{prefix}paths."
             legacy_keys = [key for key in state_dict if key.startswith(legacy_prefix)]
             if legacy_keys:
