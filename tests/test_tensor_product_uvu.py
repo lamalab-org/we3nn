@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -303,6 +305,9 @@ def test_block_coupling_weight_and_unweighted_path_match_field_oracle():
         False,
         False,
     ]
+    assert [layout.has_weight for layout in grouped.weight_layout] == [True, False]
+    assert grouped.weight_layout[1].numel == 0
+    assert math.prod(grouped.weight_layout[1].shape) > 0
 
     left = torch.randn(3, types[0].size, dtype=torch.float64, requires_grad=True)
     right = torch.randn(3, types[1].size, dtype=torch.float64, requires_grad=True)

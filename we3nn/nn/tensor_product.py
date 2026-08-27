@@ -178,12 +178,11 @@ class TensorProductInstruction:
 
     ``i_in1``, ``i_in2``, and ``i_out`` index fields in the two input
     ``FieldType`` objects and the output ``FieldType``. ``coupling`` can select
-    one real Hom-space direction; ``None`` keeps every direction. Only the
-    e3nn-style ``"uvw"`` connection mode is currently defined. ``has_weight``
-    controls whether the path consumes a learned or external reduced weight,
-    and ``path_weight`` applies an additional fixed scalar normalization.
-
-    Explicit field-level instructions support only ``"uvw"``. A grouped
+    one real Hom-space direction; ``None`` keeps every direction.
+    ``has_weight`` controls whether the path consumes a learned or external
+    reduced weight, and ``path_weight`` applies an additional fixed scalar
+    normalization. Explicit field-level instructions support only ``"uvw"``.
+    A grouped
     ``TensorProduct(connection_mode="uvu")`` exposes lazy instructions with
     ``connection_mode="uvu"`` for introspection, where each item denotes the
     tied field path ``(left_u, right_v, output_u)``. ``path_shape`` is
@@ -260,12 +259,18 @@ class TensorProductWeightLayout:
     ``(W, U, V, *coupling_shape)`` for ``"uvw"`` and
     ``(U, V, *coupling_shape)`` for ``"uvu"``. ``weight_slice`` selects this
     block from the module's concatenated reduced-weight vector.
+
+    ``has_weight=False`` means the block uses fixed coefficients and consumes
+    no entries from that vector. In that case ``shape`` still describes the
+    structural coefficient tensor while ``weight_slice`` is empty, so
+    ``math.prod(shape)`` intentionally differs from :attr:`numel`.
     """
 
     instruction: int
     connection_mode: str
     shape: tuple[int, ...]
     weight_slice: slice
+    has_weight: bool = True
 
     @property
     def numel(self) -> int:
@@ -1664,6 +1669,7 @@ class TensorProduct(nn.Module):
                         instruction.connection_mode,
                         block.weight_shape,
                         weight_slice,
+                        has_weight=block.has_weight,
                     )
                 )
 
