@@ -70,6 +70,8 @@ class KernelTensorProduct(nn.Module):
 
     ``in1_chunks``, ``in2_chunks``, ``out_chunks``, ``block_instructions``, and
     ``weight_layout`` mirror the compiled tensor-product plan for inspection.
+    Custom chunk specifications are forwarded unchanged to the underlying
+    tensor product; kernel sampling contains no separate chunking logic.
     """
 
     def __init__(
@@ -241,6 +243,9 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         block_instructions: Optional chunk-level paths forwarded directly to
             :class:`TensorProduct`; each selects its own ``"uvw"`` or
             ``"uvu"`` connection mode.
+        in1_chunks: Optional exact partition of input feature fields.
+        in2_chunks: Optional exact partition of filter fields.
+        out_chunks: Optional exact partition of output fields.
         connection_mode: ``"uvw"`` for fully connected output multiplicities
             or ``"uvu"`` for occurrence-paired input/output multiplicities.
 

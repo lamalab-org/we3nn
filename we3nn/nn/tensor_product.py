@@ -274,7 +274,8 @@ class TensorProductBlockInstruction:
 class TensorProductWeightLayout:
     """Flattened reduced-weight allocation for one compiled grouped block.
 
-    ``instruction`` is the ordinal in ``block_instructions``. ``shape`` uses
+    ``instruction`` is the compiled block ordinal (and therefore the
+    ``block_instructions`` ordinal when those are explicit). ``shape`` uses
     ``(W, U, V, *coupling_shape)`` for ``"uvw"`` and
     ``(U, V, *coupling_shape)`` for ``"uvu"``. ``weight_slice`` selects this
     block from the module's concatenated reduced-weight vector.
@@ -1606,6 +1607,12 @@ class TensorProduct(nn.Module):
             :attr:`in1_chunks`, :attr:`in2_chunks`, and :attr:`out_chunks`.
             Each instruction owns its connection mode. This argument is
             mutually exclusive with ``instructions``.
+        in1_chunks: Optional exact partition of first-input fields into
+            independently addressable multiplicity chunks.
+        in2_chunks: Optional exact partition of second-input fields.
+        out_chunks: Optional exact partition of output fields. Chunk specs
+            contain field indices only; representations and coordinate starts
+            are derived and validated from the corresponding ``FieldType``.
         connection_mode: Grouped multiplicity wiring. ``"uvw"`` independently
             connects every left/right occurrence to every output occurrence.
             ``"uvu"`` pairs output and left occurrences in encounter order and
@@ -1634,7 +1641,8 @@ class TensorProduct(nn.Module):
     New grouped checkpoints use ``blocks.*.weight`` keys; old software which
     only understands ``paths.*.weight`` cannot load them without upgrading.
     Legacy migration applies only to the implicit fully connected ``"uvw"``
-    layout, never to explicitly ordered mixed blocks.
+    layout with automatic chunks, never to custom chunk partitions or
+    explicitly ordered mixed blocks.
     """
 
     def __init__(

@@ -177,6 +177,44 @@ entry reports the block-local shape and slice. Reordering block instructions
 therefore changes external-weight and checkpoint semantics. Legacy implicit
 `"uvw"` products retain their historical flattened ordering.
 
+Equal-representation fields can optionally be split into independently
+addressable multiplicity subchunks. `FieldType` still specifies how every
+field transforms; `MultiplicityChunkSpec` supplies a validated field-index
+partition; the compiled read-only `MultiplicityChunk` adds the inferred
+representation and coordinate starts. `TensorProductBlockInstruction` then
+selects one left, right, and output chunk.
+
+```python
+in_chunks = [
+    group.nn.MultiplicityChunkSpec(tuple(range(0, 64))),
+    group.nn.MultiplicityChunkSpec(tuple(range(64, 128))),
+]
+out_chunks = [
+    group.nn.MultiplicityChunkSpec(tuple(range(0, 64))),
+    group.nn.MultiplicityChunkSpec(tuple(range(64, 128))),
+]
+
+tp = group.nn.TensorProduct(
+    in_type,
+    filter_type,
+    out_type,
+    in1_chunks=in_chunks,
+    out_chunks=out_chunks,
+    block_instructions=[
+        group.nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu"),
+        group.nn.TensorProductBlockInstruction(1, 0, 1, connection_mode="uvu"),
+    ],
+)
+```
+
+Both input chunks above carry the same representation, but have independent
+channel wiring and parameters. Explicit specs must cover every field exactly
+once. Their chunk order and the field order inside each chunk are preserved.
+Automatic chunking is unchanged when no specs are supplied: all occurrences
+of an equal representation still form one chunk, including noncontiguous
+occurrences. Custom chunks use block-contiguous reduced-weight layout; the
+historical implicit `"uvw"` layout remains reserved for automatic chunks.
+
 The sampled basis has shape
 `(..., weight_numel, output_dim, input_dim)`. `clebsch_gordan(left, right, output)` returns one normalized tensor for each
 representation copy, with shape
