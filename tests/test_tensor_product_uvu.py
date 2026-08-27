@@ -27,6 +27,28 @@ def _explicit_reference(grouped: nn.TensorProduct) -> nn.TensorProduct:
     ).double()
 
 
+def _configured_explicit_reference(grouped: nn.TensorProduct) -> nn.TensorProduct:
+    instructions = [
+        nn.TensorProductInstruction(
+            path.i_in1,
+            path.i_in2,
+            path.i_out,
+            coupling=path.coupling,
+            has_weight=path.has_weight,
+            path_weight=path.path_weight,
+        )
+        for path in grouped.instructions
+    ]
+    return nn.TensorProduct(
+        grouped.in1_type,
+        grouped.in2_type,
+        grouped.out_type,
+        instructions=instructions,
+        internal_weights=False,
+        shared_weights=grouped.shared_weights,
+    ).double()
+
+
 def _compare_external_with_reference(grouped, left, right, weights):
     reference = _explicit_reference(grouped)
     left_ref = left.detach().clone().requires_grad_()
@@ -196,6 +218,79 @@ def test_zero_dimensional_block_coupling_is_rejected():
             nn.FieldType(space, [scalar]),
             nn.FieldType(space, [e1]),
             block_instructions=[nn.TensorProductBlockInstruction(0, 0, 0)],
+        )
+
+
+def test_block_coupling_weight_and_unweighted_path_match_field_oracle():
+    torch.manual_seed(127)
+    space = _space("cyclic", 6)
+    e1, e2 = _e(space, 1), _e(space, 2)
+    types = (
+        nn.FieldType(space, [e1, e1]),
+        nn.FieldType(space, [e1]),
+        nn.FieldType(space, [e2, e2]),
+    )
+    assert full_coupling_basis(e1, e1, e2).shape[0] >= 2
+    grouped = nn.TensorProduct(
+        *types,
+        block_instructions=[
+            nn.TensorProductBlockInstruction(
+                0, 0, 0, connection_mode="uvu", coupling=1, path_weight=0.25
+            ),
+            nn.TensorProductBlockInstruction(
+                0,
+                0,
+                0,
+                connection_mode="uvu",
+                coupling=0,
+                has_weight=False,
+                path_weight=-0.5,
+            ),
+        ],
+        internal_weights=False,
+        shared_weights=False,
+    ).double()
+    reference = _configured_explicit_reference(grouped)
+    assert grouped.weight_numel == 2
+    assert [path.has_weight for path in grouped.instructions] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+    left = torch.randn(3, types[0].size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(3, types[1].size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(3, grouped.weight_numel, dtype=torch.float64, requires_grad=True)
+    left_ref = left.detach().clone().requires_grad_()
+    right_ref = right.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+    actual = grouped(left, right, weights)
+    expected = reference(left_ref, right_ref, weights_ref)
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    for new, old in ((left, left_ref), (right, right_ref), (weights, weights_ref)):
+        torch.testing.assert_close(new.grad, old.grad, atol=3e-11, rtol=3e-11)
+
+
+def test_block_coupling_validation_and_unweighted_ambiguity():
+    space = _space("cyclic", 6)
+    e1, e2 = _e(space, 1), _e(space, 2)
+    types = tuple(nn.FieldType(space, [rep]) for rep in (e1, e1, e2))
+    with pytest.raises(ValueError, match="coupling index"):
+        nn.TensorProduct(
+            *types,
+            block_instructions=[
+                nn.TensorProductBlockInstruction(0, 0, 0, coupling=99)
+            ],
+        )
+    with pytest.raises(ValueError, match="must select one coupling"):
+        nn.TensorProduct(
+            *types,
+            block_instructions=[
+                nn.TensorProductBlockInstruction(0, 0, 0, has_weight=False)
+            ],
         )
 
 

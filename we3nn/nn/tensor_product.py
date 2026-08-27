@@ -1831,7 +1831,7 @@ class TensorProduct(nn.Module):
         if self._grouped:
             for block in self.blocks:
                 external = None
-                if not self.internal_weights:
+                if not self.internal_weights and block.has_weight:
                     external = block.external_weight(weight)
                 output = block.add_to_output(output, block(input1, input2, external))
             return wrap_if_typed(output, self.out_type, typed)
