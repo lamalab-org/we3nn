@@ -59,6 +59,18 @@ def test_multiplicity_chunks_are_stable_and_include_noncontiguous_occurrences():
     assert [chunk.multiplicity for chunk in product.out_chunks] == [2, 1]
 
 
+def test_block_instruction_and_weight_layout_are_public_value_types():
+    instruction = nn.TensorProductBlockInstruction(1, 2, 3, connection_mode="uvu")
+    layout = nn.TensorProductWeightLayout(0, "uvu", (4, 2, 1), slice(3, 11))
+
+    assert instruction.i_in1 == 1
+    assert instruction.connection_mode == "uvu"
+    assert layout.shape == (4, 2, 1)
+    assert layout.numel == 8
+    with pytest.raises(AttributeError):
+        instruction.connection_mode = "uvw"
+
+
 @pytest.mark.parametrize(
     "kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)]
 )

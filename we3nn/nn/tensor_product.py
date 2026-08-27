@@ -24,6 +24,7 @@ from .representation_tensor import (
 
 
 _CG_MAX_INTERMEDIATE_BYTES = 256 << 20
+_CONNECTION_MODES = frozenset({"uvw", "uvu"})
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,43 @@ class MultiplicityChunk:
     @property
     def multiplicity(self) -> int:
         return len(self.field_indices)
+
+
+@dataclass(frozen=True)
+class TensorProductBlockInstruction:
+    """Select one grouped representation-triple multiplicity block.
+
+    The three indices address :attr:`TensorProduct.in1_chunks`,
+    :attr:`TensorProduct.in2_chunks`, and :attr:`TensorProduct.out_chunks`, not
+    individual fields. ``connection_mode="uvw"`` fully mixes output, left,
+    and right multiplicities. ``"uvu"`` pairs output and left occurrences and
+    therefore requires equal output/left multiplicities.
+
+    Instructions are compiled in the supplied order. Duplicate instructions
+    intentionally create independent blocks and independent reduced weights.
+    """
+
+    i_in1: int
+    i_in2: int
+    i_out: int
+    connection_mode: str = "uvw"
+    coupling: int | None = None
+    has_weight: bool = True
+    path_weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class TensorProductWeightLayout:
+    """Flattened reduced-weight allocation for one compiled grouped block."""
+
+    instruction: int
+    connection_mode: str
+    shape: tuple[int, ...]
+    weight_slice: slice
+
+    @property
+    def numel(self) -> int:
+        return self.weight_slice.stop - self.weight_slice.start
 
 
 def _regular_indices(group) -> torch.Tensor:
@@ -1371,7 +1409,7 @@ class TensorProduct(nn.Module):
             raise ValueError("all FieldTypes must use the same group instance")
         if internal_weights and not shared_weights:
             raise ValueError("internal tensor-product weights must be shared")
-        if connection_mode not in {"uvw", "uvu"}:
+        if connection_mode not in _CONNECTION_MODES:
             raise ValueError("connection_mode must be 'uvw' or 'uvu'")
         if instructions is not None and connection_mode != "uvw":
             raise ValueError(

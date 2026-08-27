@@ -9,7 +9,9 @@ from .tensor_product import (
     FullyConnectedTensorProduct,
     MultiplicityChunk,
     TensorProduct,
+    TensorProductBlockInstruction,
     TensorProductInstruction,
+    TensorProductWeightLayout,
 )
 from .kernel_tensor_product import SphericalKernelTensorProduct, KernelTensorProduct
 from .representation_tensor import (
@@ -31,7 +33,9 @@ __all__ = [
     "RepresentationTensor",
     "SequentialModule",
     "TensorProduct",
+    "TensorProductBlockInstruction",
     "TensorProductInstruction",
+    "TensorProductWeightLayout",
     "KernelTensorProduct",
     "SphericalKernelTensorProduct",
 ]
