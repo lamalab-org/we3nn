@@ -308,6 +308,55 @@ def construct_edge_product(
     ).to(device)
 
 
+def benchmark_connection_modes(
+    channels: int,
+    filter_multiplicity: int,
+    edge_count: int,
+    *,
+    device: torch.device,
+) -> list[dict[str, float | int | str]]:
+    """Compare radial-weight storage for fully mixed and channelwise kernels."""
+    space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
+    e1, e2 = space.irrep(1, 1), space.irrep(1, 2)
+    left = nn.FieldType(space, [e1] * channels)
+    filters = nn.FieldType(space, [e1] * filter_multiplicity)
+    output = nn.FieldType(space, [e2] * channels)
+    rows = []
+    for connection_mode in ("uvw", "uvu"):
+        gc.collect()
+        start = time.perf_counter_ns()
+        module = nn.TensorProduct(
+            left,
+            filters,
+            output,
+            connection_mode=connection_mode,
+            internal_weights=False,
+            shared_weights=False,
+        ).to(device)
+        synchronize()
+        constructor_ms = (time.perf_counter_ns() - start) / 1e6
+        external_bytes = edge_count * module.weight_numel * torch.float32.itemsize
+        rows.append(
+            {
+                "connection_mode": connection_mode,
+                "channels": channels,
+                "filter_multiplicity": filter_multiplicity,
+                "edges": edge_count,
+                "constructor_ms": constructor_ms,
+                "weight_numel": module.weight_numel,
+                "per_edge_weight_mib": external_bytes / 2**20,
+                "per_edge_weight_gib": external_bytes / 2**30,
+                "modules": sum(1 for _ in module.modules()),
+                "grouped_blocks": len(module.blocks),
+                "coupling_buffers": sum(
+                    name.endswith("coupling_basis") and buffer.numel() > 0
+                    for name, buffer in module.named_buffers()
+                ),
+            }
+        )
+    return rows
+
+
 def message_passing_estimate(
     edge_count: int,
     module: nn.TensorProduct,
@@ -421,6 +470,9 @@ def main() -> None:
     parser.add_argument("--edge-right-multiplicity", type=int, default=128)
     parser.add_argument("--edge-output-multiplicity", type=int, default=8)
     parser.add_argument("--edge-budget-mib", type=float, default=256.0)
+    parser.add_argument("--uvu-channels", type=int, default=128)
+    parser.add_argument("--uvu-filter-multiplicity", type=int, default=1)
+    parser.add_argument("--uvu-edge-count", type=int, default=50_000)
     parser.add_argument(
         "--edge-run-max",
         type=int,
@@ -454,6 +506,20 @@ def main() -> None:
     for multiplicity in args.constructor_multiplicities:
         result = benchmark_external_constructor(multiplicity, device=device)
         print(",".join(str(result[key]) for key in result))
+
+    connection_rows = benchmark_connection_modes(
+        args.uvu_channels,
+        args.uvu_filter_multiplicity,
+        args.uvu_edge_count,
+        device=device,
+    )
+    print(
+        "connection_mode,channels,filter_multiplicity,edges,constructor_ms,"
+        "weight_numel,per_edge_weight_mib,per_edge_weight_gib,modules,"
+        "grouped_blocks,coupling_buffers"
+    )
+    for row in connection_rows:
+        print(",".join(str(row[key]) for key in row))
 
     edge_module = construct_edge_product(
         args.edge_left_multiplicity,

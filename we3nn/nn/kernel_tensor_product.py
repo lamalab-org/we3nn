@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import torch
 from torch import nn
 
@@ -9,7 +11,11 @@ from ..embedding import RestrictedO3Representation
 from ..harmonics import RestrictedSphericalHarmonics
 from ..representations import Representation
 from .field_type import FieldType, as_field_type
-from .tensor_product import TensorProduct
+from .tensor_product import (
+    MultiplicityChunkSpec,
+    TensorProduct,
+    TensorProductBlockInstruction,
+)
 from .representation_tensor import (
     RepresentationTensor,
     unpack_tensor_product_inputs,
@@ -33,6 +39,16 @@ class KernelTensorProduct(nn.Module):
     ``(..., weight_numel)`` matching the inputs' leading axes. Shared weights
     have shape ``(weight_numel,)``.
 
+    ``connection_mode="uvu"`` preserves the first-input occurrence index in
+    the output and stores reduced weights over ``(u, v, coupling)``. Matching
+    input/output multiplicities are required for every compatible grouped
+    representation triple. The default ``"uvw"`` retains fully connected
+    output-channel mixing and historical external-weight ordering.
+    ``block_instructions`` instead selects multiplicity chunks explicitly and
+    allows each grouped representation triple to choose ``"uvw"`` or
+    ``"uvu"`` independently. It is forwarded unchanged to
+    :class:`TensorProduct`; no kernel-specific mode logic is applied.
+
     This separation is useful for steerable kernels: angular/filter features
     determine the fixed equivariant basis while a radial network predicts the
     reduced coefficients. :meth:`sample_kernel_basis` expands filter samples
@@ -43,14 +59,34 @@ class KernelTensorProduct(nn.Module):
     multiplicity execution plan owned by the underlying :class:`TensorProduct`.
     Sampling iterates over unique representation triples, not logical field
     triples, while preserving the historical flattened reduced-weight order.
+    Sampling requires every selected block to be weighted: an unweighted
+    block is an affine, weight-independent contribution and cannot be encoded
+    in a basis whose axis enumerates reduced weights.
 
     Raw feature/filter tensors emit
     :class:`MissingRepresentationMetadataWarning`. If both are
     :class:`RepresentationTensor` objects, metadata is validated and the
     output is typed. Reduced weights are invariant scalars and need no wrapper.
+
+    ``in1_chunks``, ``in2_chunks``, ``out_chunks``, ``block_instructions``, and
+    ``weight_layout`` mirror the compiled tensor-product plan for inspection.
+    Custom chunk specifications are forwarded unchanged to the underlying
+    tensor product; kernel sampling contains no separate chunking logic.
     """
 
-    def __init__(self, rep_in: FieldType | Representation, rep_filter: FieldType | Representation, rep_out: FieldType | Representation, *, shared_weights: bool = False):
+    def __init__(
+        self,
+        rep_in: FieldType | Representation,
+        rep_filter: FieldType | Representation,
+        rep_out: FieldType | Representation,
+        *,
+        shared_weights: bool = False,
+        block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
+        in1_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        in2_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        out_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        connection_mode: str = "uvw",
+    ):
         super().__init__()
         if isinstance(rep_in, Representation):
             rep_in = as_field_type(rep_in)
@@ -65,6 +101,11 @@ class KernelTensorProduct(nn.Module):
             rep_in,
             rep_filter,
             rep_out,
+            block_instructions=block_instructions,
+            in1_chunks=in1_chunks,
+            in2_chunks=in2_chunks,
+            out_chunks=out_chunks,
+            connection_mode=connection_mode,
             internal_weights=False,
             shared_weights=shared_weights,
         )
@@ -72,6 +113,12 @@ class KernelTensorProduct(nn.Module):
         self.in1_type = rep_in
         self.in2_type = rep_filter
         self.out_type = rep_out
+        self.connection_mode = self.tensor_product.connection_mode
+        self.block_instructions = self.tensor_product.block_instructions
+        self.in1_chunks = self.tensor_product.in1_chunks
+        self.in2_chunks = self.tensor_product.in2_chunks
+        self.out_chunks = self.tensor_product.out_chunks
+        self.weight_layout = self.tensor_product.weight_layout
 
     def forward(
         self,
@@ -193,6 +240,14 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         harmonics: Optional evaluator when ``rep_filter`` is supplied as a
             representation rather than as a module.
         shared_weights: Share one reduced-weight vector over leading axes.
+        block_instructions: Optional chunk-level paths forwarded directly to
+            :class:`TensorProduct`; each selects its own ``"uvw"`` or
+            ``"uvu"`` connection mode.
+        in1_chunks: Optional exact partition of input feature fields.
+        in2_chunks: Optional exact partition of filter fields.
+        out_chunks: Optional exact partition of output fields.
+        connection_mode: ``"uvw"`` for fully connected output multiplicities
+            or ``"uvu"`` for occurrence-paired input/output multiplicities.
 
     The output is a :class:`RepresentationTensor` when the feature input is
     typed; representation mismatches are rejected before harmonic contraction.
@@ -206,6 +261,11 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         *,
         harmonics: RestrictedSphericalHarmonics | None = None,
         shared_weights: bool = False,
+        block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
+        in1_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        in2_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        out_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        connection_mode: str = "uvw",
     ):
         if isinstance(rep_filter, RestrictedSphericalHarmonics):
             if harmonics is not None:
@@ -243,6 +303,11 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
             rep_filter,
             rep_out,
             shared_weights=shared_weights,
+            block_instructions=block_instructions,
+            in1_chunks=in1_chunks,
+            in2_chunks=in2_chunks,
+            out_chunks=out_chunks,
+            connection_mode=connection_mode,
         )
         self.harmonics = harmonics
         self.embedding = harmonics.embedding if harmonics is not None else None
