@@ -2163,6 +2163,9 @@ class FullyConnectedTensorProduct(TensorProduct):
         ]
         | None = None,
         *,
+        in1_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        in2_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        out_chunks: Iterable[MultiplicityChunkSpec] | None = None,
         internal_weights: bool = True,
         shared_weights: bool = True,
     ):
@@ -2171,6 +2174,9 @@ class FullyConnectedTensorProduct(TensorProduct):
             in2_type,
             out_type,
             instructions,
+            in1_chunks=in1_chunks,
+            in2_chunks=in2_chunks,
+            out_chunks=out_chunks,
             connection_mode="uvw",
             internal_weights=internal_weights,
             shared_weights=shared_weights,

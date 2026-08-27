@@ -11,7 +11,11 @@ from ..embedding import RestrictedO3Representation
 from ..harmonics import RestrictedSphericalHarmonics
 from ..representations import Representation
 from .field_type import FieldType, as_field_type
-from .tensor_product import TensorProduct, TensorProductBlockInstruction
+from .tensor_product import (
+    MultiplicityChunkSpec,
+    TensorProduct,
+    TensorProductBlockInstruction,
+)
 from .representation_tensor import (
     RepresentationTensor,
     unpack_tensor_product_inputs,
@@ -76,6 +80,9 @@ class KernelTensorProduct(nn.Module):
         *,
         shared_weights: bool = False,
         block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
+        in1_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        in2_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        out_chunks: Iterable[MultiplicityChunkSpec] | None = None,
         connection_mode: str = "uvw",
     ):
         super().__init__()
@@ -93,6 +100,9 @@ class KernelTensorProduct(nn.Module):
             rep_filter,
             rep_out,
             block_instructions=block_instructions,
+            in1_chunks=in1_chunks,
+            in2_chunks=in2_chunks,
+            out_chunks=out_chunks,
             connection_mode=connection_mode,
             internal_weights=False,
             shared_weights=shared_weights,
@@ -247,6 +257,9 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         harmonics: RestrictedSphericalHarmonics | None = None,
         shared_weights: bool = False,
         block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
+        in1_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        in2_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        out_chunks: Iterable[MultiplicityChunkSpec] | None = None,
         connection_mode: str = "uvw",
     ):
         if isinstance(rep_filter, RestrictedSphericalHarmonics):
@@ -286,6 +299,9 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
             rep_out,
             shared_weights=shared_weights,
             block_instructions=block_instructions,
+            in1_chunks=in1_chunks,
+            in2_chunks=in2_chunks,
+            out_chunks=out_chunks,
             connection_mode=connection_mode,
         )
         self.harmonics = harmonics
