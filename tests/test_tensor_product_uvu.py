@@ -294,6 +294,44 @@ def test_block_coupling_validation_and_unweighted_ambiguity():
         )
 
 
+def test_mixed_internal_weights_and_gradients_match_field_oracle():
+    torch.manual_seed(139)
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    grouped = nn.TensorProduct(
+        *types, block_instructions=_mixed_block_instructions()
+    ).double()
+    reference = nn.TensorProduct(
+        *types,
+        instructions=[
+            (path.i_in1, path.i_in2, path.i_out) for path in grouped.instructions
+        ],
+    ).double()
+    flattened = torch.cat([block.weight.detach().reshape(-1) for block in grouped.blocks])
+    offset = 0
+    with torch.no_grad():
+        for path in reference.paths:
+            count = path.weight_numel
+            path.weight.copy_(flattened[offset : offset + count].reshape(path.weight_shape))
+            offset += count
+    assert offset == grouped.weight_numel
+
+    left = torch.randn(2, types[0].size, dtype=torch.float64, requires_grad=True)
+    right = torch.randn(2, types[1].size, dtype=torch.float64, requires_grad=True)
+    left_ref = left.detach().clone().requires_grad_()
+    right_ref = right.detach().clone().requires_grad_()
+    actual = grouped(left, right)
+    expected = reference(left_ref, right_ref)
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    actual.square().sum().backward()
+    expected.square().sum().backward()
+    torch.testing.assert_close(left.grad, left_ref.grad, atol=8e-11, rtol=8e-11)
+    torch.testing.assert_close(right.grad, right_ref.grad, atol=8e-11, rtol=8e-11)
+    grouped_grad = torch.cat([block.weight.grad.reshape(-1) for block in grouped.blocks])
+    reference_grad = torch.cat([path.weight.grad.reshape(-1) for path in reference.paths])
+    torch.testing.assert_close(grouped_grad, reference_grad, atol=8e-11, rtol=8e-11)
+
+
 @pytest.mark.parametrize(
     "kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)]
 )
@@ -614,6 +652,67 @@ def test_uvu_internal_regular_weights_and_gradients_match_reference():
     grouped_grad = torch.cat([block.weight.grad.reshape(-1) for block in grouped.blocks])
     reference_grad = torch.cat([path.weight.grad.reshape(-1) for path in reference.paths])
     torch.testing.assert_close(grouped_grad, reference_grad, atol=8e-11, rtol=8e-11)
+
+
+def test_mixed_cg_and_regular_blocks_match_oracle_basis_and_equivariance():
+    torch.manual_seed(149)
+    space = _space("dihedral", 5)
+    e1, e2, regular = _e(space, 1), _e(space, 2), space.regular_repr
+    types = (
+        nn.FieldType(space, [e1, e1, regular, regular]),
+        nn.FieldType(space, [e1, e1]),
+        nn.FieldType(space, [e2, e2, regular, regular]),
+    )
+    block_instructions = [
+        nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(0, 0, 1, connection_mode="uvw"),
+        nn.TensorProductBlockInstruction(1, 0, 1, connection_mode="uvu"),
+    ]
+    kernel = nn.KernelTensorProduct(
+        *types, block_instructions=block_instructions
+    ).double()
+    reference = _configured_explicit_reference(kernel.tensor_product)
+    assert [block.kind for block in kernel.tensor_product.blocks] == [
+        "cg",
+        "output_regular",
+        "output_regular",
+    ]
+
+    features = torch.randn(2, types[0].size, dtype=torch.float64, requires_grad=True)
+    filters = torch.randn(2, types[1].size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(2, kernel.weight_numel, dtype=torch.float64, requires_grad=True)
+    features_ref = features.detach().clone().requires_grad_()
+    filters_ref = filters.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+    actual = kernel(features, filters, weights)
+    expected = reference(features_ref, filters_ref, weights_ref)
+    basis = kernel.sample_kernel_basis(filters)
+    reconstructed = torch.einsum(
+        "...poi,...i,...p->...o", basis, features, weights
+    )
+    torch.testing.assert_close(actual, expected, atol=8e-12, rtol=8e-12)
+    torch.testing.assert_close(reconstructed, actual, atol=8e-12, rtol=8e-12)
+    (actual.square().sum() + reconstructed.square().sum()).backward()
+    (2.0 * expected.square().sum()).backward()
+    for new, old in (
+        (features, features_ref),
+        (filters, filters_ref),
+        (weights, weights_ref),
+    ):
+        torch.testing.assert_close(new.grad, old.grad, atol=2e-10, rtol=2e-10)
+
+    for element in space.fibergroup.elements:
+        transformed = kernel(
+            types[0].transform_fibers(features.detach(), element),
+            types[1].transform_fibers(filters.detach(), element),
+            weights.detach(),
+        )
+        torch.testing.assert_close(
+            transformed,
+            types[2].transform_fibers(actual.detach(), element),
+            atol=8e-10,
+            rtol=8e-10,
+        )
 
 
 @pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
@@ -972,3 +1071,32 @@ def test_uvu_128_channel_kernel_scale_has_linear_weights_and_one_block():
     )
     assert fully_mixed.weight_numel == channels**2 * coupling_count
     assert fully_mixed.weight_numel == channels * product.weight_numel
+
+
+def test_mixed_block_plan_scales_with_instructions_not_field_paths():
+    space = _space("dihedral", 6)
+    scalar, e1 = space.trivial_repr, _e(space, 1)
+    left_type = nn.FieldType(space, [e1] * 128 + [scalar] * 64)
+    filter_type = nn.FieldType(space, [scalar, e1])
+    output_type = nn.FieldType(space, [e1] * 128 + [scalar] * 64)
+    block_instructions = [
+        nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(1, 0, 1, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(1, 1, 0, connection_mode="uvw"),
+        nn.TensorProductBlockInstruction(0, 1, 1, connection_mode="uvw"),
+    ]
+
+    product = nn.TensorProduct(
+        left_type,
+        filter_type,
+        output_type,
+        block_instructions=block_instructions,
+        internal_weights=False,
+    )
+
+    assert len(product.blocks) == 4
+    assert len(product.paths) == 0
+    assert len(product.block_instructions) == 4
+    assert sum(1 for _ in product.modules()) == 7
+    assert len(product.instructions) == 128 + 64 + 64 * 128 + 128 * 64
+    assert product.weight_numel == len(product.instructions)
