@@ -715,6 +715,51 @@ def test_mixed_cg_and_regular_blocks_match_oracle_basis_and_equivariance():
         )
 
 
+def test_selected_regular_block_coupling_and_path_weight_sample_correctly():
+    torch.manual_seed(151)
+    space = _space("dihedral", 5)
+    e1, regular = _e(space, 1), space.regular_repr
+    types = (
+        nn.FieldType(space, [e1, e1]),
+        nn.FieldType(space, [e1]),
+        nn.FieldType(space, [regular, regular]),
+    )
+    instruction = nn.TensorProductBlockInstruction(
+        0, 0, 0, connection_mode="uvu", coupling=2, path_weight=-0.75
+    )
+    kernel = nn.KernelTensorProduct(
+        *types, block_instructions=[instruction]
+    ).double()
+    reference = _configured_explicit_reference(kernel.tensor_product)
+    features = torch.randn(3, types[0].size, dtype=torch.float64)
+    filters = torch.randn(3, types[1].size, dtype=torch.float64)
+    weights = torch.randn(3, kernel.weight_numel, dtype=torch.float64)
+    direct = kernel(features, filters, weights)
+    expected = reference(features, filters, weights)
+    sampled = kernel.sample_kernel_basis(filters)
+    reconstructed = torch.einsum(
+        "...poi,...i,...p->...o", sampled, features, weights
+    )
+    torch.testing.assert_close(direct, expected, atol=8e-12, rtol=8e-12)
+    torch.testing.assert_close(reconstructed, direct, atol=8e-12, rtol=8e-12)
+
+
+def test_kernel_basis_rejects_unweighted_mixed_block():
+    space = _space("dihedral", 6)
+    scalar = space.trivial_repr
+    type_ = nn.FieldType(space, [scalar])
+    kernel = nn.KernelTensorProduct(
+        type_,
+        type_,
+        type_,
+        block_instructions=[
+            nn.TensorProductBlockInstruction(0, 0, 0, has_weight=False)
+        ],
+    )
+    with pytest.raises(RuntimeError, match="does not support unweighted"):
+        kernel.sample_kernel_basis(torch.randn(2, 1))
+
+
 @pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
 def test_uvu_analytic_regular_paths_are_equivariant(regular_position):
     space = _space("dihedral", 5)

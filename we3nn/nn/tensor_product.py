@@ -24,7 +24,18 @@ from .representation_tensor import (
 
 
 _CG_MAX_INTERMEDIATE_BYTES = 256 << 20
-_CONNECTION_MODES = frozenset({"uvw", "uvu"})
+
+
+@dataclass(frozen=True)
+class _ConnectionModeSpec:
+    multiplicity_axes: tuple[str, ...]
+    output_equals_left: bool = False
+
+
+_CONNECTION_MODES = {
+    "uvw": _ConnectionModeSpec(("output", "left", "right")),
+    "uvu": _ConnectionModeSpec(("left", "right"), output_equals_left=True),
+}
 
 
 @dataclass(frozen=True)
@@ -722,18 +733,24 @@ class _MultiplicityTensorProductBlock(nn.Module):
         output_multiplicity, left_multiplicity, right_multiplicity = (
             self.multiplicity_shape
         )
-        if connection_mode == "uvw":
-            multiplicity_weight_shape = self.multiplicity_shape
-        elif connection_mode == "uvu":
+        mode_spec = _CONNECTION_MODES.get(connection_mode)
+        if mode_spec is None:
+            raise ValueError(f"unsupported connection_mode={connection_mode!r}")
+        if mode_spec.output_equals_left:
             if output_multiplicity != left_multiplicity:
                 raise ValueError(
                     "connection_mode='uvu' requires matching output and left "
                     f"multiplicities, got {output_multiplicity} and "
                     f"{left_multiplicity}"
                 )
+        if mode_spec.multiplicity_axes == ("output", "left", "right"):
+            multiplicity_weight_shape = self.multiplicity_shape
+        elif mode_spec.multiplicity_axes == ("left", "right"):
             multiplicity_weight_shape = (left_multiplicity, right_multiplicity)
         else:
-            raise ValueError(f"unsupported connection_mode={connection_mode!r}")
+            raise RuntimeError(
+                f"connection_mode={connection_mode!r} has no grouped implementation"
+            )
         self.multiplicity_weight_shape = multiplicity_weight_shape
         self.weight_shape = (*multiplicity_weight_shape, *self.coupling_shape)
         self.weight_numel = math.prod(self.weight_shape) if self.has_weight else 0
