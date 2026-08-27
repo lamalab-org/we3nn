@@ -40,6 +40,10 @@ class KernelTensorProduct(nn.Module):
     input/output multiplicities are required for every compatible grouped
     representation triple. The default ``"uvw"`` retains fully connected
     output-channel mixing and historical external-weight ordering.
+    ``block_instructions`` instead selects multiplicity chunks explicitly and
+    allows each grouped representation triple to choose ``"uvw"`` or
+    ``"uvu"`` independently. It is forwarded unchanged to
+    :class:`TensorProduct`; no kernel-specific mode logic is applied.
 
     This separation is useful for steerable kernels: angular/filter features
     determine the fixed equivariant basis while a radial network predicts the
@@ -56,6 +60,9 @@ class KernelTensorProduct(nn.Module):
     :class:`MissingRepresentationMetadataWarning`. If both are
     :class:`RepresentationTensor` objects, metadata is validated and the
     output is typed. Reduced weights are invariant scalars and need no wrapper.
+
+    ``in1_chunks``, ``in2_chunks``, ``out_chunks``, ``block_instructions``, and
+    ``weight_layout`` mirror the compiled tensor-product plan for inspection.
     """
 
     def __init__(

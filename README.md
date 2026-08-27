@@ -149,6 +149,34 @@ messages = spherical_tp.forward_from_points(node_features, edge_vectors, weights
 kernel_basis = spherical_tp.sample_kernel_basis(edge_vectors)
 ```
 
+Connection modes can also be selected per representation-triple multiplicity
+block. Chunk indices are inspectable through `in1_chunks`, `in2_chunks`, and
+`out_chunks`; they never refer to individual fields.
+
+```python
+mixed = group.nn.KernelTensorProduct(
+    node_type,
+    edge_type,
+    output_type,
+    block_instructions=[
+        # Preserve the E1 node-channel index: W = U is required.
+        group.nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu"),
+        # Independently mix scalar inputs into every E1 output channel.
+        group.nn.TensorProductBlockInstruction(1, 1, 0, connection_mode="uvw"),
+    ],
+)
+
+for index, chunk in enumerate(mixed.in1_chunks):
+    print(index, chunk.representation.name, chunk.multiplicity)
+print(mixed.weight_layout)
+```
+
+For explicit mixed blocks, the flattened reduced-weight vector is the
+concatenation of block weights in instruction order. Each `weight_layout`
+entry reports the block-local shape and slice. Reordering block instructions
+therefore changes external-weight and checkpoint semantics. Legacy implicit
+`"uvw"` products retain their historical flattened ordering.
+
 The sampled basis has shape
 `(..., weight_numel, output_dim, input_dim)`. `clebsch_gordan(left, right, output)` returns one normalized tensor for each
 representation copy, with shape
