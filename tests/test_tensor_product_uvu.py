@@ -844,6 +844,72 @@ def test_uvu_spherical_kernel_from_points_basis_gradients_and_equivariance():
         )
 
 
+def test_mixed_spherical_kernel_preserves_points_api_and_basis_reconstruction():
+    torch.manual_seed(137)
+    group = gspaces.flipRot2dOnR2(6).fibergroup
+    space = gspaces.no_base_space(group)
+    harmonics = RestrictedSphericalHarmonics(
+        group, degrees=[0, 1, 2], normalization="component"
+    )
+    e1 = _e(space, 1)
+    feature_type = nn.FieldType(space, [e1] * 2)
+    output_type = nn.FieldType(space, [e1] * 2)
+    block_instructions = [
+        nn.TensorProductBlockInstruction(0, 0, 0, connection_mode="uvu"),
+        nn.TensorProductBlockInstruction(0, 2, 0, connection_mode="uvw"),
+    ]
+    kernel = nn.SphericalKernelTensorProduct(
+        feature_type,
+        harmonics,
+        output_type,
+        block_instructions=block_instructions,
+    ).double()
+    reference = _configured_explicit_reference(kernel.tensor_product)
+    assert [block.connection_mode for block in kernel.tensor_product.blocks] == [
+        "uvu",
+        "uvw",
+    ]
+
+    features = torch.randn(2, feature_type.size, dtype=torch.float64, requires_grad=True)
+    points = torch.randn(2, 3, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(2, kernel.weight_numel, dtype=torch.float64, requires_grad=True)
+    features_ref = features.detach().clone().requires_grad_()
+    points_ref = points.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+
+    actual = kernel.forward_from_points(features, points, weights)
+    expected = reference(features_ref, harmonics(points_ref), weights_ref)
+    basis = kernel.sample_kernel_basis(points)
+    reconstructed = torch.einsum(
+        "...poi,...i,...p->...o", basis, features, weights
+    )
+    torch.testing.assert_close(actual, expected, atol=5e-12, rtol=5e-12)
+    torch.testing.assert_close(reconstructed, actual, atol=5e-12, rtol=5e-12)
+    (actual.square().sum() + reconstructed.square().sum()).backward()
+    (2.0 * expected.square().sum()).backward()
+    for new, old in (
+        (features, features_ref),
+        (points, points_ref),
+        (weights, weights_ref),
+    ):
+        torch.testing.assert_close(new.grad, old.grad, atol=2e-10, rtol=2e-10)
+
+    actual = actual.detach()
+    for element in group.elements:
+        matrix = harmonics.embedding.matrix(element, dtype=torch.float64)
+        transformed = kernel.forward_from_points(
+            feature_type.transform_fibers(features.detach(), element),
+            points.detach() @ matrix.T,
+            weights.detach(),
+        )
+        torch.testing.assert_close(
+            transformed,
+            output_type.transform_fibers(actual, element),
+            atol=3e-6,
+            rtol=3e-6,
+        )
+
+
 def test_uvu_preserves_representation_tensor_type_safety():
     space = _space("dihedral", 6)
     e1, e2 = _e(space, 1), _e(space, 2)
