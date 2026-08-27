@@ -193,6 +193,25 @@ class TensorProductInstruction:
         return math.prod(self.path_shape)
 
 
+@dataclass(frozen=True)
+class MultiplicityChunk:
+    """Read-only descriptor for equal-representation field occurrences.
+
+    A chunk contains every occurrence of one representation in a
+    :class:`FieldType`, in encounter order. Occurrences need not be contiguous.
+    ``field_indices`` address fields while ``coordinate_starts`` address their
+    first coordinates in the flattened tensor layout.
+    """
+
+    representation: Representation
+    field_indices: tuple[int, ...]
+    coordinate_starts: tuple[int, ...]
+
+    @property
+    def multiplicity(self) -> int:
+        return len(self.field_indices)
+
+
 def _regular_indices(group) -> torch.Tensor:
     """indices[q, a] selects ``(rho_regular(q).T x)[a]`` from x."""
     index = {element.value: i for i, element in enumerate(group.elements)}
@@ -208,19 +227,27 @@ def _contiguous_field_slice(starts: tuple[int, ...], field_size: int) -> slice |
     return None
 
 
-def _representation_occurrences(
-    field_type: FieldType,
-) -> dict[Representation, tuple[tuple[int, ...], tuple[int, ...]]]:
-    """Group field indices and coordinate starts by representation identity."""
+def _multiplicity_chunks(field_type: FieldType) -> tuple[MultiplicityChunk, ...]:
+    """Group equal representations deterministically in first-encounter order."""
     grouped = defaultdict(lambda: ([], []))
     for field_index, (representation, start) in enumerate(
         zip(field_type, field_type.fields_start)
     ):
         grouped[representation][0].append(field_index)
         grouped[representation][1].append(start)
-    return {
-        representation: (tuple(indices), tuple(starts))
+    return tuple(
+        MultiplicityChunk(representation, tuple(indices), tuple(starts))
         for representation, (indices, starts) in grouped.items()
+    )
+
+
+def _representation_occurrences(
+    field_type: FieldType,
+) -> dict[Representation, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Compatibility mapping backed by deterministic multiplicity chunks."""
+    return {
+        chunk.representation: (chunk.field_indices, chunk.coordinate_starts)
+        for chunk in _multiplicity_chunks(field_type)
     }
 
 
@@ -1357,6 +1384,9 @@ class TensorProduct(nn.Module):
         self.internal_weights = bool(internal_weights)
         self.shared_weights = bool(shared_weights)
         self.connection_mode = connection_mode
+        self.in1_chunks = _multiplicity_chunks(in1_type)
+        self.in2_chunks = _multiplicity_chunks(in2_type)
+        self.out_chunks = _multiplicity_chunks(out_type)
 
         if instructions is None:
             left_occurrences = _representation_occurrences(in1_type)

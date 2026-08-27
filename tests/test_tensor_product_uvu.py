@@ -42,6 +42,23 @@ def _compare_external_with_reference(grouped, left, right, weights):
         torch.testing.assert_close(new.grad, old.grad, atol=3e-11, rtol=3e-11)
 
 
+def test_multiplicity_chunks_are_stable_and_include_noncontiguous_occurrences():
+    space = _space("dihedral", 6)
+    scalar, e1, e2 = space.trivial_repr, _e(space, 1), _e(space, 2)
+    left_type = nn.FieldType(space, [e1, scalar, e1, e2, e1])
+    right_type = nn.FieldType(space, [scalar])
+    output_type = nn.FieldType(space, [e1, e1, scalar])
+
+    product = nn.TensorProduct(left_type, right_type, output_type)
+
+    assert [chunk.representation for chunk in product.in1_chunks] == [e1, scalar, e2]
+    assert product.in1_chunks[0].field_indices == (0, 2, 4)
+    assert product.in1_chunks[0].coordinate_starts == (0, 3, 7)
+    assert product.in1_chunks[0].multiplicity == 3
+    assert product.in2_chunks[0].field_indices == (0,)
+    assert [chunk.multiplicity for chunk in product.out_chunks] == [2, 1]
+
+
 @pytest.mark.parametrize(
     "kind,n", [("cyclic", 5), ("cyclic", 6), ("dihedral", 5), ("dihedral", 6)]
 )

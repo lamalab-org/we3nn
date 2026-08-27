@@ -4,7 +4,13 @@ from .field_type import FieldType
 from .linear import WELinear
 from .nonlinearities import ELU, ReLU, PointActiv, PointwiseNonLinearity
 from .sequential import SequentialModule
-from .tensor_product import FullTensorProduct, FullyConnectedTensorProduct, TensorProduct, TensorProductInstruction
+from .tensor_product import (
+    FullTensorProduct,
+    FullyConnectedTensorProduct,
+    MultiplicityChunk,
+    TensorProduct,
+    TensorProductInstruction,
+)
 from .kernel_tensor_product import SphericalKernelTensorProduct, KernelTensorProduct
 from .representation_tensor import (
     MissingRepresentationMetadataWarning,
@@ -17,6 +23,7 @@ __all__ = [
     "FullyConnectedTensorProduct",
     "FullTensorProduct",
     "MissingRepresentationMetadataWarning",
+    "MultiplicityChunk",
     "WELinear",
     "PointwiseNonLinearity",
     "PointActiv",
