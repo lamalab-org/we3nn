@@ -697,6 +697,73 @@ def test_uvu_kernel_forward_basis_and_gradients_match_field_path_oracle(shared_w
         )
 
 
+def test_mixed_kernel_basis_reconstructs_multiaxis_forward_and_matches_oracle(
+    monkeypatch,
+):
+    torch.manual_seed(131)
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    kernel = nn.KernelTensorProduct(
+        *types,
+        block_instructions=_mixed_block_instructions(),
+        shared_weights=False,
+    ).double()
+    reference = _configured_explicit_reference(kernel.tensor_product)
+    assert kernel.connection_mode is None
+    assert len(kernel.tensor_product.blocks) == 3
+    assert len(kernel.tensor_product.paths) == 0
+
+    tensor_product_module = __import__(
+        "we3nn.nn.tensor_product", fromlist=["_CG_MAX_INTERMEDIATE_BYTES"]
+    )
+    minimum_budget = max(
+        block.coupling_shape[0] * block.output.size * torch.float64.itemsize
+        for block in kernel.tensor_product.blocks
+        if block.kind == "cg"
+    )
+    monkeypatch.setattr(
+        tensor_product_module, "_CG_MAX_INTERMEDIATE_BYTES", minimum_budget
+    )
+
+    features = torch.randn(2, 3, types[0].size, dtype=torch.float64, requires_grad=True)
+    filters = torch.randn(2, 3, types[1].size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(
+        2, 3, kernel.weight_numel, dtype=torch.float64, requires_grad=True
+    )
+    features_ref = features.detach().clone().requires_grad_()
+    filters_ref = filters.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+
+    actual = kernel(features, filters, weights)
+    expected = reference(features_ref, filters_ref, weights_ref)
+    sampled = kernel.sample_kernel_basis(filters)
+    reconstructed = torch.einsum(
+        "...poi,...i,...p->...o", sampled, features, weights
+    )
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    torch.testing.assert_close(reconstructed, actual, atol=3e-12, rtol=3e-12)
+
+    (actual.square().sum() + reconstructed.square().sum()).backward()
+    (2.0 * expected.square().sum()).backward()
+    for new, old in (
+        (features, features_ref),
+        (filters, filters_ref),
+        (weights, weights_ref),
+    ):
+        torch.testing.assert_close(new.grad, old.grad, atol=8e-11, rtol=8e-11)
+
+    for element in space.fibergroup.elements:
+        transformed = kernel(
+            types[0].transform_fibers(features.detach(), element),
+            types[1].transform_fibers(filters.detach(), element),
+            weights.detach(),
+        )
+        expected_transformed = types[2].transform_fibers(actual.detach(), element)
+        torch.testing.assert_close(
+            transformed, expected_transformed, atol=5e-10, rtol=5e-10
+        )
+
+
 @pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
 def test_uvu_regular_kernel_basis_reconstructs_analytic_forward(regular_position):
     space = _space("dihedral", 5)

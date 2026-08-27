@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import torch
 from torch import nn
 
@@ -9,7 +11,7 @@ from ..embedding import RestrictedO3Representation
 from ..harmonics import RestrictedSphericalHarmonics
 from ..representations import Representation
 from .field_type import FieldType, as_field_type
-from .tensor_product import TensorProduct
+from .tensor_product import TensorProduct, TensorProductBlockInstruction
 from .representation_tensor import (
     RepresentationTensor,
     unpack_tensor_product_inputs,
@@ -63,6 +65,7 @@ class KernelTensorProduct(nn.Module):
         rep_out: FieldType | Representation,
         *,
         shared_weights: bool = False,
+        block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
         connection_mode: str = "uvw",
     ):
         super().__init__()
@@ -79,6 +82,7 @@ class KernelTensorProduct(nn.Module):
             rep_in,
             rep_filter,
             rep_out,
+            block_instructions=block_instructions,
             connection_mode=connection_mode,
             internal_weights=False,
             shared_weights=shared_weights,
@@ -87,7 +91,12 @@ class KernelTensorProduct(nn.Module):
         self.in1_type = rep_in
         self.in2_type = rep_filter
         self.out_type = rep_out
-        self.connection_mode = connection_mode
+        self.connection_mode = self.tensor_product.connection_mode
+        self.block_instructions = self.tensor_product.block_instructions
+        self.in1_chunks = self.tensor_product.in1_chunks
+        self.in2_chunks = self.tensor_product.in2_chunks
+        self.out_chunks = self.tensor_product.out_chunks
+        self.weight_layout = self.tensor_product.weight_layout
 
     def forward(
         self,
@@ -224,6 +233,7 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         *,
         harmonics: RestrictedSphericalHarmonics | None = None,
         shared_weights: bool = False,
+        block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
         connection_mode: str = "uvw",
     ):
         if isinstance(rep_filter, RestrictedSphericalHarmonics):
@@ -262,6 +272,7 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
             rep_filter,
             rep_out,
             shared_weights=shared_weights,
+            block_instructions=block_instructions,
             connection_mode=connection_mode,
         )
         self.harmonics = harmonics
