@@ -1645,6 +1645,9 @@ class TensorProduct(nn.Module):
         instructions: Iterable[TensorProductInstruction | tuple[int, int, int]] | None = None,
         *,
         block_instructions: Iterable[TensorProductBlockInstruction] | None = None,
+        in1_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        in2_chunks: Iterable[MultiplicityChunkSpec] | None = None,
+        out_chunks: Iterable[MultiplicityChunkSpec] | None = None,
         connection_mode: str = "uvw",
         internal_weights: bool = True,
         shared_weights: bool = True,
@@ -1680,11 +1683,25 @@ class TensorProduct(nn.Module):
         self.internal_weights = bool(internal_weights)
         self.shared_weights = bool(shared_weights)
         self.connection_mode = None if block_instructions is not None else connection_mode
-        self.in1_chunks = _multiplicity_chunks(in1_type)
-        self.in2_chunks = _multiplicity_chunks(in2_type)
-        self.out_chunks = _multiplicity_chunks(out_type)
+        self.has_custom_chunks = any(
+            specs is not None for specs in (in1_chunks, in2_chunks, out_chunks)
+        )
+        self.in1_chunks = _compile_multiplicity_chunks(
+            in1_type, in1_chunks, label="first-input"
+        )
+        self.in2_chunks = _compile_multiplicity_chunks(
+            in2_type, in2_chunks, label="second-input"
+        )
+        self.out_chunks = _compile_multiplicity_chunks(
+            out_type, out_chunks, label="output"
+        )
         self._implicit_fully_connected = (
             instructions is None and block_instructions is None
+        )
+        self._uses_legacy_weight_layout = (
+            self._implicit_fully_connected
+            and not self.has_custom_chunks
+            and connection_mode == "uvw"
         )
 
         if block_instructions is not None:
@@ -1776,51 +1793,53 @@ class TensorProduct(nn.Module):
             return
 
         if instructions is None:
-            left_occurrences = _representation_occurrences(in1_type)
-            right_occurrences = _representation_occurrences(in2_type)
-            output_occurrences = _representation_occurrences(out_type)
             coupling_dimensions = {}
             block_specs = []
-            for output, (output_fields, output_starts) in output_occurrences.items():
-                for left, (left_fields, left_starts) in left_occurrences.items():
-                    for right, (right_fields, right_starts) in right_occurrences.items():
+            for output_chunk in self.out_chunks:
+                for left_chunk in self.in1_chunks:
+                    for right_chunk in self.in2_chunks:
+                        output = output_chunk.representation
+                        left = left_chunk.representation
+                        right = right_chunk.representation
                         dimension = _coupling_dimension(left, right, output)
                         coupling_dimensions[(output, left, right)] = dimension
                         if not dimension:
                             continue
-                        if connection_mode == "uvu" and len(output_fields) != len(
-                            left_fields
+                        if (
+                            connection_mode == "uvu"
+                            and output_chunk.multiplicity != left_chunk.multiplicity
                         ):
                             raise ValueError(
                                 "connection_mode='uvu' requires matching left/output "
-                                f"multiplicities for coupling {left.name} x {right.name} "
-                                f"-> {output.name}: {len(left_fields)} != "
-                                f"{len(output_fields)}"
+                                "multiplicities for selected chunks in coupling "
+                                f"{left.name} x {right.name} -> {output.name}: "
+                                f"{left_chunk.multiplicity} != "
+                                f"{output_chunk.multiplicity}"
                             )
                         block_specs.append(
                             (
                                 left,
                                 right,
                                 output,
-                                left_fields,
-                                left_starts,
-                                right_fields,
-                                right_starts,
-                                output_fields,
-                                output_starts,
+                                left_chunk.field_indices,
+                                left_chunk.coordinate_starts,
+                                right_chunk.field_indices,
+                                right_chunk.coordinate_starts,
+                                output_chunk.field_indices,
+                                output_chunk.coordinate_starts,
                                 dimension,
                             )
                         )
 
             legacy_prefixes = None
-            if not internal_weights and connection_mode == "uvw":
+            if not internal_weights and self._uses_legacy_weight_layout:
                 legacy_prefixes = _legacy_weight_prefixes(
                     in1_type, in2_type, out_type, coupling_dimensions
                 )
             blocks = []
+            layouts = []
             weight_numel = 0
             logical_paths = 0
-            uvu_external_offset = 0
             for (
                 left,
                 right,
@@ -1841,13 +1860,15 @@ class TensorProduct(nn.Module):
                         left_prefixes[output][torch.tensor(left_fields)],
                         right_prefixes[(output, left)][torch.tensor(right_fields)],
                     )
-                uvu_weight_numel = len(left_fields) * len(right_fields) * dimension
                 external_weight_slice = None
-                if not internal_weights and connection_mode == "uvu":
+                if not internal_weights and not self._uses_legacy_weight_layout:
                     external_weight_slice = slice(
-                        uvu_external_offset, uvu_external_offset + uvu_weight_numel
+                        weight_numel, weight_numel + (
+                            len(output_fields) * len(left_fields) * len(right_fields) * dimension
+                            if connection_mode == "uvw"
+                            else len(left_fields) * len(right_fields) * dimension
+                        )
                     )
-                    uvu_external_offset += uvu_weight_numel
                 block = _MultiplicityTensorProductBlock(
                     left,
                     right,
@@ -1864,6 +1885,17 @@ class TensorProduct(nn.Module):
                     external_weight_slice=external_weight_slice,
                 )
                 blocks.append(block)
+                if self.has_custom_chunks:
+                    weight_slice = slice(weight_numel, weight_numel + block.weight_numel)
+                    layouts.append(
+                        TensorProductWeightLayout(
+                            len(layouts),
+                            connection_mode,
+                            block.weight_shape,
+                            weight_slice,
+                            has_weight=block.has_weight,
+                        )
+                    )
                 multiplicity_paths = (
                     len(output_fields) * len(left_fields) * len(right_fields)
                     if connection_mode == "uvw"
@@ -1882,10 +1914,10 @@ class TensorProduct(nn.Module):
                     logical_paths,
                     coupling_dimensions,
                 )
-                if connection_mode == "uvw"
+                if self._uses_legacy_weight_layout
                 else _LazyGroupedInstructions(blocks)
             )
-            self.weight_layout = None
+            self.weight_layout = tuple(layouts) if self.has_custom_chunks else None
             self.weight_numel = weight_numel
             self._coupling_dimensions = coupling_dimensions
             self._grouped = True
@@ -2008,7 +2040,7 @@ class TensorProduct(nn.Module):
         error_msgs,
     ):
         """Migrate legacy fully-connected per-path state dictionaries."""
-        if self._implicit_fully_connected and self.connection_mode == "uvw":
+        if self._uses_legacy_weight_layout:
             legacy_prefix = f"{prefix}paths."
             legacy_keys = [key for key in state_dict if key.startswith(legacy_prefix)]
             if legacy_keys:
