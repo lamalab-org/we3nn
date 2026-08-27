@@ -236,6 +236,11 @@ class TensorProductBlockInstruction:
 
     Instructions are compiled in the supplied order. Duplicate instructions
     intentionally create independent blocks and independent reduced weights.
+    ``coupling`` optionally selects one flattened coupling coordinate;
+    ``has_weight=False`` fixes that coordinate to one and requires an
+    unambiguous singleton or explicitly selected coupling. ``path_weight``
+    multiplies the complete block contribution without changing its learned
+    parameterization.
     """
 
     i_in1: int
@@ -249,7 +254,13 @@ class TensorProductBlockInstruction:
 
 @dataclass(frozen=True)
 class TensorProductWeightLayout:
-    """Flattened reduced-weight allocation for one compiled grouped block."""
+    """Flattened reduced-weight allocation for one compiled grouped block.
+
+    ``instruction`` is the ordinal in ``block_instructions``. ``shape`` uses
+    ``(W, U, V, *coupling_shape)`` for ``"uvw"`` and
+    ``(U, V, *coupling_shape)`` for ``"uvu"``. ``weight_slice`` selects this
+    block from the module's concatenated reduced-weight vector.
+    """
 
     instruction: int
     connection_mode: str
@@ -1474,6 +1485,8 @@ class TensorProduct(nn.Module):
     weights are concatenated in that same order; :attr:`weight_layout`
     exposes each block's shape and contiguous slice. Reordering block
     instructions therefore changes external-weight and checkpoint semantics.
+    Since there is no meaningful module-global wiring mode in this case,
+    :attr:`connection_mode` is ``None``; inspect each block or layout entry.
 
     For every grouped product, :attr:`instructions` is a lazy field-level
     compatibility view: ``len()``

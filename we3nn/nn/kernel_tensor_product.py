@@ -55,6 +55,9 @@ class KernelTensorProduct(nn.Module):
     multiplicity execution plan owned by the underlying :class:`TensorProduct`.
     Sampling iterates over unique representation triples, not logical field
     triples, while preserving the historical flattened reduced-weight order.
+    Sampling requires every selected block to be weighted: an unweighted
+    block is an affine, weight-independent contribution and cannot be encoded
+    in a basis whose axis enumerates reduced weights.
 
     Raw feature/filter tensors emit
     :class:`MissingRepresentationMetadataWarning`. If both are
@@ -225,6 +228,9 @@ class SphericalKernelTensorProduct(KernelTensorProduct):
         harmonics: Optional evaluator when ``rep_filter`` is supplied as a
             representation rather than as a module.
         shared_weights: Share one reduced-weight vector over leading axes.
+        block_instructions: Optional chunk-level paths forwarded directly to
+            :class:`TensorProduct`; each selects its own ``"uvw"`` or
+            ``"uvu"`` connection mode.
         connection_mode: ``"uvw"`` for fully connected output multiplicities
             or ``"uvu"`` for occurrence-paired input/output multiplicities.
 

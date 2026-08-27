@@ -159,6 +159,51 @@ def test_duplicate_block_instructions_remain_independent_blocks():
     assert product.weight_numel == 2 * product.blocks[0].weight_numel
 
 
+def test_mixed_lazy_instructions_preserve_block_local_logical_order():
+    space = _space("dihedral", 6)
+    product = nn.TensorProduct(
+        *_mixed_types(space),
+        block_instructions=_mixed_block_instructions(),
+        internal_weights=False,
+    )
+    logical = [
+        (path.i_in1, path.i_in2, path.i_out, path.connection_mode)
+        for path in product.instructions
+    ]
+    assert logical[:6] == [
+        (0, 0, 0, "uvu"),
+        (0, 2, 0, "uvu"),
+        (2, 0, 2, "uvu"),
+        (2, 2, 2, "uvu"),
+        (4, 0, 3, "uvu"),
+        (4, 2, 3, "uvu"),
+    ]
+    assert logical[6:12] == [
+        (1, 1, 0, "uvw"),
+        (3, 1, 0, "uvw"),
+        (1, 1, 2, "uvw"),
+        (3, 1, 2, "uvw"),
+        (1, 1, 3, "uvw"),
+        (3, 1, 3, "uvw"),
+    ]
+    assert product.instructions[-1] == tuple(product.instructions)[-1]
+    assert list(product.instructions[1:4]) == list(product.instructions)[1:4]
+
+
+def test_empty_block_plan_is_a_valid_zero_map():
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    product = nn.TensorProduct(
+        *types, block_instructions=[], internal_weights=False
+    )
+    left = torch.randn(2, types[0].size)
+    right = torch.randn(2, types[1].size)
+    output = product(left, right)
+    assert product.weight_numel == 0
+    assert len(product.blocks) == len(product.instructions) == 0
+    torch.testing.assert_close(output, torch.zeros_like(output))
+
+
 @pytest.mark.parametrize(
     "block_instructions,connection_mode,error",
     [
@@ -906,6 +951,40 @@ def test_mixed_kernel_basis_reconstructs_multiaxis_forward_and_matches_oracle(
         torch.testing.assert_close(
             transformed, expected_transformed, atol=5e-10, rtol=5e-10
         )
+
+
+def test_mixed_kernel_supports_shared_external_weights():
+    torch.manual_seed(157)
+    space = _space("dihedral", 6)
+    types = _mixed_types(space)
+    kernel = nn.KernelTensorProduct(
+        *types,
+        block_instructions=_mixed_block_instructions(),
+        shared_weights=True,
+    ).double()
+    reference = _configured_explicit_reference(kernel.tensor_product)
+    features = torch.randn(2, 3, types[0].size, dtype=torch.float64, requires_grad=True)
+    filters = torch.randn(2, 3, types[1].size, dtype=torch.float64, requires_grad=True)
+    weights = torch.randn(kernel.weight_numel, dtype=torch.float64, requires_grad=True)
+    features_ref = features.detach().clone().requires_grad_()
+    filters_ref = filters.detach().clone().requires_grad_()
+    weights_ref = weights.detach().clone().requires_grad_()
+    actual = kernel(features, filters, weights)
+    expected = reference(features_ref, filters_ref, weights_ref)
+    sampled = kernel.sample_kernel_basis(filters)
+    reconstructed = torch.einsum(
+        "...poi,...i,p->...o", sampled, features, weights
+    )
+    torch.testing.assert_close(actual, expected, atol=3e-12, rtol=3e-12)
+    torch.testing.assert_close(reconstructed, actual, atol=3e-12, rtol=3e-12)
+    (actual.square().sum() + reconstructed.square().sum()).backward()
+    (2.0 * expected.square().sum()).backward()
+    for new, old in (
+        (features, features_ref),
+        (filters, filters_ref),
+        (weights, weights_ref),
+    ):
+        torch.testing.assert_close(new.grad, old.grad, atol=8e-11, rtol=8e-11)
 
 
 @pytest.mark.parametrize("regular_position", ["output", "left", "right", "all"])
