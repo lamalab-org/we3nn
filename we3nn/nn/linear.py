@@ -241,23 +241,6 @@ class _PairExpansion(nn.Module):
         mixed = torch.einsum("vup,...ui->...vpi", coefficients, value)
         return torch.einsum("poi,...vpi->...vo", self.basis, mixed)
 
-    def dense(self, input: torch.Tensor) -> torch.Tensor:
-        """Apply only this pair through a locally expanded dense block."""
-        value = self.pack_input(input).flatten(-2)
-        if self._regular_to_regular:
-            blocks = self.coefficients[..., self.relative] / math.sqrt(
-                self.out_rep.group.order()
-            )
-        else:
-            blocks = torch.einsum("rcp,poi->rcoi", self.coefficients, self.basis)
-        operator = blocks.permute(0, 2, 1, 3).reshape(
-            self.coefficients.shape[0] * self.out_size,
-            self.coefficients.shape[1] * self.in_size,
-        )
-        return F.linear(value, operator).reshape(
-            *value.shape[:-1], self.coefficients.shape[0], self.out_size
-        )
-
     def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Accumulate a packed ``[..., V, O]`` result into flat output fields."""
         flat_value = value.reshape(*value.shape[:-2], -1)
@@ -516,9 +499,7 @@ class WELinear(nn.Module):
         """Execute multiplicity-grouped representation-pair contractions."""
         output = tensor.new_zeros(*tensor.shape[:-1], self.out_type.size)
         for pair in self._pairs:
-            use_direct = self.execution == "direct" or pair.auto_uses_direct()
-            value = pair.direct(tensor) if use_direct else pair.dense(tensor)
-            output = pair.add_to_output(output, value)
+            output = pair.add_to_output(output, pair.direct(tensor))
         if self.bias:
             for bias in self._biases:
                 output = bias.add_to_output(output)
