@@ -167,13 +167,13 @@ def test_direct_does_not_call_global_dense_expansion(monkeypatch):
     assert layer(torch.randn(3, type_.size)).shape == (3, type_.size)
 
 
-def test_auto_mixes_direct_and_pair_local_dense_without_global_expansion(monkeypatch):
+def test_auto_hybrid_mixes_pairs_without_global_expansion(monkeypatch):
     space = _space()
     in_type = nn.FieldType(
         space, [space.trivial_repr] * 16 + [space.regular_repr] * 2
     )
     out_type = nn.FieldType(space, [space.regular_repr] * 3)
-    layer = nn.WELinear(in_type, out_type, execution="auto")
+    layer = nn.WELinear(in_type, out_type, execution="auto_hybrid")
     kinds = {pair.direct_kind: pair.auto_uses_direct() for pair in layer._pairs}
     assert kinds == {"trivial_regular": True, "regular_regular": False}
 
@@ -185,6 +185,24 @@ def test_auto_mixes_direct_and_pair_local_dense_without_global_expansion(monkeyp
     assert layer(x).shape == (4, out_type.size)
     with torch.no_grad():
         assert layer(x).shape == (4, out_type.size)
+
+
+def test_default_is_dense_and_auto_is_conservative_whole_layer_selection():
+    space = _space()
+    in_type = nn.FieldType(
+        space, [space.trivial_repr] * 16 + [space.regular_repr] * 2
+    )
+    out_type = nn.FieldType(space, [space.regular_repr] * 3)
+    default = nn.WELinear(in_type, out_type)
+    assert default.execution == "dense"
+
+    automatic = nn.WELinear(in_type, out_type, execution="auto")
+    x = torch.randn(4, in_type.size)
+    automatic(x)
+    assert automatic._inference_weight.numel() == 0
+    with torch.no_grad():
+        automatic(x)
+    assert automatic._inference_weight.shape == (out_type.size, in_type.size)
 
 
 def test_regular_inverse_permutation_is_cached_without_large_group_duplication():

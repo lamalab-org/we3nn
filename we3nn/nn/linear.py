@@ -370,13 +370,13 @@ class WELinear(nn.Module):
     preserves the historical global dense expansion and its versioned
     no-gradient inference cache. ``execution="direct"`` contracts inputs with
     reduced coefficients and intertwiner structure without materializing the
-    global dense weight. ``execution="auto"`` selects direct channel mixing
-    and small structured contractions per representation pair. Pairs better
-    served by dense GEMM use only a pair-local expanded operator, so one dense
-    pair does not disable direct execution for the rest of the layer. Explicit
-    ``"dense"`` execution retains the versioned global inference cache. If no
-    pair benefits from direct execution, ``"auto"`` uses that global dense
-    path as well instead of decomposing one GEMM into local operations.
+    global dense weight. ``execution="auto"`` is a conservative whole-layer
+    selector: it uses direct execution only when every pair supports a favored
+    direct path and otherwise preserves global dense execution. The
+    ``"auto_hybrid"`` strategy selects per representation pair; favorable
+    pairs execute directly while the rest use pair-local dense operators.
+    ``"dense"`` is the backward-compatible default and retains the versioned
+    global inference cache.
 
     ``backend`` selects how intertwiner bases are constructed; it is
     independent of the execution strategy. :meth:`expand_parameters` always
@@ -391,13 +391,15 @@ class WELinear(nn.Module):
         initialize: bool = True,
         *,
         backend: str = "auto",
-        execution: str = "auto",
+        execution: str = "dense",
     ):
         super().__init__()
         if backend not in {"auto", "structured", "generic"}:
             raise ValueError("backend must be 'auto', 'structured', or 'generic'")
-        if execution not in {"auto", "dense", "direct"}:
-            raise ValueError("execution must be 'auto', 'dense', or 'direct'")
+        if execution not in {"auto", "auto_hybrid", "dense", "direct"}:
+            raise ValueError(
+                "execution must be 'dense', 'direct', 'auto', or 'auto_hybrid'"
+            )
         self.backend = "structured" if backend == "auto" else backend
         self.execution = execution
         if isinstance(in_type, Representation):
@@ -504,15 +506,19 @@ class WELinear(nn.Module):
         tensor, typed = unpack_representation_tensor(input, self.in_type, "input")
         if tensor.shape[-1] != self.in_type.size:
             raise ValueError(f"expected last dimension {self.in_type.size}, got {tensor.shape[-1]}")
-        auto_has_direct = self.execution == "auto" and any(
-            pair.auto_uses_direct() for pair in self._pairs
-        )
-        if self.execution == "dense" or (
-            self.execution == "auto" and not auto_has_direct
-        ):
+        if self.execution == "dense":
             output = self._forward_dense(tensor)
         else:
-            output = self._forward_structured(tensor)
+            pair_choices = tuple(pair.auto_uses_direct() for pair in self._pairs)
+            auto_dense = self.execution == "auto" and (
+                not torch.is_grad_enabled() or not all(pair_choices)
+            )
+            hybrid_dense = self.execution == "auto_hybrid" and not any(pair_choices)
+            output = (
+                self._forward_dense(tensor)
+                if auto_dense or hybrid_dense
+                else self._forward_structured(tensor)
+            )
         return wrap_if_typed(output, self.out_type, typed)
 
     def _forward_dense(self, tensor: torch.Tensor) -> torch.Tensor:

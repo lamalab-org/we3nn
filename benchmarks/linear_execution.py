@@ -104,14 +104,14 @@ def _second_derivative_ms(
 def _print_case(name: str, rows: list[dict[str, float | str]]) -> None:
     print(f"\n{name}")
     print(
-        "execution  inference_ms  training_forward_ms  forward_backward_ms  "
+        "execution     inference_ms  training_forward_ms  forward_backward_ms  "
         "peak_tensor_mib"
     )
     for row in rows:
         peak = row["peak_tensor_mib"]
         peak_text = "n/a" if isinstance(peak, float) and peak != peak else f"{peak:.2f}"
         print(
-            f"{row['execution']:>9}  {row['inference_ms']:>12.4f}  "
+            f"{row['execution']:>12}  {row['inference_ms']:>12.4f}  "
             f"{row['training_forward_ms']:>19.4f}  "
             f"{row['forward_backward_ms']:>19.4f}  {peak_text:>15}"
         )
@@ -130,7 +130,7 @@ def main() -> None:
     torch.set_num_threads(1)
     space = gspaces.no_base_space(gspaces.flipRot2dOnR2(6).fibergroup)
     scalar, regular = space.trivial_repr, space.regular_repr
-    executions = ("dense", "direct", "auto")
+    executions = ("dense", "direct", "auto", "auto_hybrid")
 
     edge_in = nn.FieldType(space, [scalar] * 160 + [regular] * 6)
     edge_out = nn.FieldType(space, [regular] * 3)
