@@ -187,6 +187,42 @@ def test_auto_hybrid_mixes_pairs_without_global_expansion(monkeypatch):
         assert layer(x).shape == (4, out_type.size)
 
 
+def test_auto_hybrid_mixed_edge_encoder_values_and_gradients_match_dense():
+    torch.manual_seed(233)
+    space = _space()
+    in_type = nn.FieldType(
+        space, [space.trivial_repr] * 16 + [space.regular_repr] * 2
+    )
+    out_type = nn.FieldType(space, [space.regular_repr] * 3)
+    dense = nn.WELinear(in_type, out_type, execution="dense").double()
+    hybrid = nn.WELinear(in_type, out_type, execution="auto_hybrid").double()
+    hybrid.load_state_dict(dense.state_dict(), strict=True)
+    assert [pair.auto_uses_direct() for pair in hybrid._pairs] == [True, False]
+
+    dense_input = torch.randn(
+        2, 3, in_type.size, dtype=torch.float64, requires_grad=True
+    )
+    hybrid_input = dense_input.detach().clone().requires_grad_()
+    dense_output = dense(dense_input)
+    hybrid_output = hybrid(hybrid_input)
+    torch.testing.assert_close(hybrid_output, dense_output, atol=3e-12, rtol=3e-12)
+
+    dense_output.square().sum().backward()
+    hybrid_output.square().sum().backward()
+    torch.testing.assert_close(
+        hybrid_input.grad, dense_input.grad, atol=3e-11, rtol=3e-11
+    )
+    for dense_parameter, hybrid_parameter in zip(
+        dense.parameters(), hybrid.parameters()
+    ):
+        torch.testing.assert_close(
+            hybrid_parameter.grad,
+            dense_parameter.grad,
+            atol=4e-11,
+            rtol=4e-11,
+        )
+
+
 def test_default_is_dense_and_auto_is_conservative_whole_layer_selection():
     space = _space()
     in_type = nn.FieldType(
