@@ -134,7 +134,7 @@ def test_generic_and_structured_linear_backends_span_same_maps():
 
 def test_no_grad_linear_cache_invalidates_after_parameter_update():
     _, input_type, regular_type = _types("dihedral", 6)
-    layer = nn.WELinear(input_type, regular_type)
+    layer = nn.WELinear(input_type, regular_type, execution="dense")
     x = torch.randn(4, input_type.size)
     with torch.no_grad():
         before = layer(x)

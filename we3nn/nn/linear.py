@@ -114,6 +114,17 @@ class _PairExpansion(nn.Module):
                 dtype=torch.long,
             )
             self.register_buffer("relative", relative, persistent=False)
+            # Cache the inverse permutation for ordinary finite groups.  For
+            # unusually large groups retain the previous quadratic-memory
+            # footprint and derive it only when explicitly running direct.
+            inverse_relative = (
+                torch.argsort(relative, dim=1).T.contiguous()
+                if out_rep.group.order() <= 64
+                else torch.empty(0, dtype=torch.long)
+            )
+            self.register_buffer(
+                "inverse_relative", inverse_relative, persistent=False
+            )
             self.register_buffer("basis", torch.empty(0), persistent=False)
         else:
             self.register_buffer(
@@ -122,6 +133,9 @@ class _PairExpansion(nn.Module):
                 persistent=False,
             )
             self.register_buffer("relative", torch.empty(0, dtype=torch.long), persistent=False)
+            self.register_buffer(
+                "inverse_relative", torch.empty(0, dtype=torch.long), persistent=False
+            )
         self._row_slice = _contiguous_field_slice(unique_rows, out_rep.size)
         self._column_slice = _contiguous_field_slice(unique_columns, in_rep.size)
         rows = torch.tensor(unique_rows)[:, None] + torch.arange(out_rep.size)[None, :]
@@ -219,9 +233,11 @@ class _PairExpansion(nn.Module):
 
         if self.direct_kind == "regular_regular":
             # inverse_relative[p, o] is the input coordinate i satisfying
-            # relative[o, i] == p.  Derive it from the existing quadratic
-            # table instead of retaining a second equally large buffer.
-            inverse_relative = torch.argsort(self.relative, dim=1).T
+            # relative[o, i] == p.  Large groups avoid retaining a second
+            # quadratic table and derive this only on the uncommon direct path.
+            inverse_relative = self.inverse_relative
+            if inverse_relative.numel() == 0:
+                inverse_relative = torch.argsort(self.relative, dim=1).T
             # shifted[..., u, p, o] = input[..., u, i(p, o)].  The following
             # contraction is the regular-representation group convolution.
             shifted = value[..., :, inverse_relative]
@@ -240,6 +256,23 @@ class _PairExpansion(nn.Module):
             return torch.einsum("vup,...upo->...vo", coefficients, coupled)
         mixed = torch.einsum("vup,...ui->...vpi", coefficients, value)
         return torch.einsum("poi,...vpi->...vo", self.basis, mixed)
+
+    def dense(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply this pair through a pair-local expanded dense operator."""
+        value = self.pack_input(input).flatten(-2)
+        if self._regular_to_regular:
+            blocks = self.coefficients[..., self.relative] / math.sqrt(
+                self.out_rep.group.order()
+            )
+        else:
+            blocks = torch.einsum("rcp,poi->rcoi", self.coefficients, self.basis)
+        operator = blocks.permute(0, 2, 1, 3).reshape(
+            self.coefficients.shape[0] * self.out_size,
+            self.coefficients.shape[1] * self.in_size,
+        )
+        return F.linear(value, operator).reshape(
+            *value.shape[:-1], self.coefficients.shape[0], self.out_size
+        )
 
     def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Accumulate a packed ``[..., V, O]`` result into flat output fields."""
@@ -338,9 +371,12 @@ class WELinear(nn.Module):
     no-gradient inference cache. ``execution="direct"`` contracts inputs with
     reduced coefficients and intertwiner structure without materializing the
     global dense weight. ``execution="auto"`` selects direct channel mixing
-    and small structured contractions conservatively. It falls back to the
-    global dense operation when any representation pair is better served by
-    dense GEMM, and uses the versioned dense cache during inference.
+    and small structured contractions per representation pair. Pairs better
+    served by dense GEMM use only a pair-local expanded operator, so one dense
+    pair does not disable direct execution for the rest of the layer. Explicit
+    ``"dense"`` execution retains the versioned global inference cache. If no
+    pair benefits from direct execution, ``"auto"`` uses that global dense
+    path as well instead of decomposing one GEMM into local operations.
 
     ``backend`` selects how intertwiner bases are constructed; it is
     independent of the execution strategy. :meth:`expand_parameters` always
@@ -468,11 +504,12 @@ class WELinear(nn.Module):
         tensor, typed = unpack_representation_tensor(input, self.in_type, "input")
         if tensor.shape[-1] != self.in_type.size:
             raise ValueError(f"expected last dimension {self.in_type.size}, got {tensor.shape[-1]}")
-        auto_dense = self.execution == "auto" and (
-            not torch.is_grad_enabled()
-            or not all(pair.auto_uses_direct() for pair in self._pairs)
+        auto_has_direct = self.execution == "auto" and any(
+            pair.auto_uses_direct() for pair in self._pairs
         )
-        if self.execution == "dense" or auto_dense:
+        if self.execution == "dense" or (
+            self.execution == "auto" and not auto_has_direct
+        ):
             output = self._forward_dense(tensor)
         else:
             output = self._forward_structured(tensor)
@@ -499,7 +536,9 @@ class WELinear(nn.Module):
         """Execute multiplicity-grouped representation-pair contractions."""
         output = tensor.new_zeros(*tensor.shape[:-1], self.out_type.size)
         for pair in self._pairs:
-            output = pair.add_to_output(output, pair.direct(tensor))
+            use_direct = self.execution == "direct" or pair.auto_uses_direct()
+            value = pair.direct(tensor) if use_direct else pair.dense(tensor)
+            output = pair.add_to_output(output, value)
         if self.bias:
             for bias in self._biases:
                 output = bias.add_to_output(output)

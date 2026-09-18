@@ -167,6 +167,41 @@ def test_direct_does_not_call_global_dense_expansion(monkeypatch):
     assert layer(torch.randn(3, type_.size)).shape == (3, type_.size)
 
 
+def test_auto_mixes_direct_and_pair_local_dense_without_global_expansion(monkeypatch):
+    space = _space()
+    in_type = nn.FieldType(
+        space, [space.trivial_repr] * 16 + [space.regular_repr] * 2
+    )
+    out_type = nn.FieldType(space, [space.regular_repr] * 3)
+    layer = nn.WELinear(in_type, out_type, execution="auto")
+    kinds = {pair.direct_kind: pair.auto_uses_direct() for pair in layer._pairs}
+    assert kinds == {"trivial_regular": True, "regular_regular": False}
+
+    def fail():
+        raise AssertionError("auto execution materialized the global dense weight")
+
+    monkeypatch.setattr(layer, "expand_parameters", fail)
+    x = torch.randn(4, in_type.size)
+    assert layer(x).shape == (4, out_type.size)
+    with torch.no_grad():
+        assert layer(x).shape == (4, out_type.size)
+
+
+def test_regular_inverse_permutation_is_cached_without_large_group_duplication():
+    small = _space()
+    small_layer = nn.WELinear(
+        small.regular_repr, small.regular_repr, execution="direct"
+    )
+    assert small_layer._pairs[0].inverse_relative.shape == (12, 12)
+
+    large = _space(n=128)
+    large_layer = nn.WELinear(
+        large.regular_repr, large.regular_repr, execution="direct"
+    )
+    assert large_layer._pairs[0].relative.shape == (256, 256)
+    assert large_layer._pairs[0].inverse_relative.numel() == 0
+
+
 def test_execution_validation_auto_policy_and_parameterless_map():
     space = _space()
     scalar, vector, other = space.trivial_repr, _irrep(space, 1), _irrep(space, 2)
