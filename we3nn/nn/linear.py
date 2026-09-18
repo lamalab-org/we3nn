@@ -114,6 +114,17 @@ class _PairExpansion(nn.Module):
                 dtype=torch.long,
             )
             self.register_buffer("relative", relative, persistent=False)
+            # Cache the inverse permutation for ordinary finite groups.  For
+            # unusually large groups retain the previous quadratic-memory
+            # footprint and derive it only when explicitly running direct.
+            inverse_relative = (
+                torch.argsort(relative, dim=1).T.contiguous()
+                if out_rep.group.order() <= 64
+                else torch.empty(0, dtype=torch.long)
+            )
+            self.register_buffer(
+                "inverse_relative", inverse_relative, persistent=False
+            )
             self.register_buffer("basis", torch.empty(0), persistent=False)
         else:
             self.register_buffer(
@@ -122,6 +133,9 @@ class _PairExpansion(nn.Module):
                 persistent=False,
             )
             self.register_buffer("relative", torch.empty(0, dtype=torch.long), persistent=False)
+            self.register_buffer(
+                "inverse_relative", torch.empty(0, dtype=torch.long), persistent=False
+            )
         self._row_slice = _contiguous_field_slice(unique_rows, out_rep.size)
         self._column_slice = _contiguous_field_slice(unique_columns, in_rep.size)
         rows = torch.tensor(unique_rows)[:, None] + torch.arange(out_rep.size)[None, :]
@@ -130,6 +144,19 @@ class _PairExpansion(nn.Module):
         self.register_buffer("columns", columns, persistent=False)
         self.out_size = out_rep.size
         self.in_size = in_rep.size
+        trivial = out_rep.group.trivial_representation
+        regular = out_rep.group.regular_repr
+        if backend != "generic" and out_rep is trivial and in_rep is trivial:
+            self.direct_kind = "trivial_trivial"
+        elif backend != "generic" and out_rep is regular and in_rep is trivial:
+            self.direct_kind = "trivial_regular"
+        elif backend != "generic" and out_rep is trivial and in_rep is regular:
+            self.direct_kind = "regular_trivial"
+        elif self._regular_to_regular:
+            self.direct_kind = "regular_regular"
+        else:
+            self.direct_kind = "generic"
+
 
     def reset_parameters(self, fan_in: int, fan_out: int) -> None:
         bound = math.sqrt(6.0 / (fan_in + fan_out))
@@ -177,6 +204,97 @@ class _PairExpansion(nn.Module):
             self.coefficients.shape[0] * self.out_size,
             self.coefficients.shape[1] * self.in_size,
         )
+
+    def pack_input(self, input: torch.Tensor) -> torch.Tensor:
+        """Pack this pair's input occurrences as ``[..., U, I]``."""
+        if self._column_slice is not None:
+            value = input[..., self._column_slice]
+            return value.reshape(
+                *input.shape[:-1], self.coefficients.shape[1], self.in_size
+            )
+        return input[..., self.columns]
+
+    def direct(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply this reduced block without constructing its dense operator."""
+        value = self.pack_input(input)
+        coefficients = self.coefficients
+
+        if self.direct_kind == "trivial_trivial":
+            mixed = F.linear(value[..., :, 0], coefficients[..., 0])
+            return mixed.unsqueeze(-1) * self.basis[0, 0, 0]
+
+        if self.direct_kind == "trivial_regular":
+            mixed = F.linear(value[..., :, 0], coefficients[..., 0])
+            return mixed.unsqueeze(-1) * self.basis[0, :, 0]
+
+        if self.direct_kind == "regular_trivial":
+            projected = torch.einsum("...ui,i->...u", value, self.basis[0, 0])
+            return F.linear(projected, coefficients[..., 0]).unsqueeze(-1)
+
+        if self.direct_kind == "regular_regular":
+            # inverse_relative[p, o] is the input coordinate i satisfying
+            # relative[o, i] == p.  Large groups avoid retaining a second
+            # quadratic table and derive this only on the uncommon direct path.
+            inverse_relative = self.inverse_relative
+            if inverse_relative.numel() == 0:
+                inverse_relative = torch.argsort(self.relative, dim=1).T
+            # shifted[..., u, p, o] = input[..., u, i(p, o)].  The following
+            # contraction is the regular-representation group convolution.
+            shifted = value[..., :, inverse_relative]
+            return torch.einsum("...upo,vup->...vo", shifted, coefficients) / math.sqrt(
+                self.out_rep.group.order()
+            )
+
+        # Pick the smaller of the two natural differentiable contraction
+        # orders.  This bounds the temporary by either [..., U, P, O] or
+        # [..., V, P, I] and works for structured and generic bases alike.
+        out_fields, in_fields, paths = coefficients.shape
+        basis_first_size = in_fields * paths * self.out_size
+        coefficients_first_size = out_fields * paths * self.in_size
+        if basis_first_size <= coefficients_first_size:
+            coupled = torch.einsum("poi,...ui->...upo", self.basis, value)
+            return torch.einsum("vup,...upo->...vo", coefficients, coupled)
+        mixed = torch.einsum("vup,...ui->...vpi", coefficients, value)
+        return torch.einsum("poi,...vpi->...vo", self.basis, mixed)
+
+    def dense(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply this pair through a pair-local expanded dense operator."""
+        value = self.pack_input(input).flatten(-2)
+        if self._regular_to_regular:
+            blocks = self.coefficients[..., self.relative] / math.sqrt(
+                self.out_rep.group.order()
+            )
+        else:
+            blocks = torch.einsum("rcp,poi->rcoi", self.coefficients, self.basis)
+        operator = blocks.permute(0, 2, 1, 3).reshape(
+            self.coefficients.shape[0] * self.out_size,
+            self.coefficients.shape[1] * self.in_size,
+        )
+        return F.linear(value, operator).reshape(
+            *value.shape[:-1], self.coefficients.shape[0], self.out_size
+        )
+
+    def add_to_output(self, output: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+        """Accumulate a packed ``[..., V, O]`` result into flat output fields."""
+        flat_value = value.reshape(*value.shape[:-2], -1)
+        if self._row_slice is not None:
+            output[..., self._row_slice] = output[..., self._row_slice] + flat_value
+            return output
+        return output.index_add(-1, self.rows.reshape(-1), flat_value)
+
+    def auto_uses_direct(self) -> bool:
+        """Conservative deterministic auto-selection for this pair."""
+        if self.direct_kind in {
+            "trivial_trivial",
+            "trivial_regular",
+            "regular_trivial",
+        }:
+            return True
+        if self.direct_kind == "regular_regular":
+            return False
+        paths = self.coefficients.shape[-1]
+        dense_coordinates = self.out_size * self.in_size
+        return paths * (self.out_size + self.in_size) <= dense_coordinates
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
@@ -227,6 +345,15 @@ class _BiasExpansion(nn.Module):
             raise RuntimeError("bias block is not contiguous")
         return torch.einsum("cp,po->co", self.coefficients, self.basis).reshape(-1)
 
+    def add_to_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Apply invariant bias without expanding the global bias vector."""
+        values = torch.einsum("cp,po->co", self.coefficients, self.basis)
+        if self._row_slice is not None:
+            output[..., self._row_slice] = output[..., self._row_slice] + values.reshape(-1)
+            return output
+        flat_values = values.reshape(-1).expand(*output.shape[:-1], values.numel())
+        return output.index_add(-1, self.rows.reshape(-1), flat_values)
+
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
         trivial = self.out_rep.group.trivial_representation
@@ -239,9 +366,21 @@ class _BiasExpansion(nn.Module):
 class WELinear(nn.Module):
     """A complete learnable equivariant map between finite-group fields.
 
-    Parameters are stored in a minimal intertwiner basis. The dense kernel is
-    materialized only for the matrix multiply, keeping persistent memory no
-    larger than a conventional dense layer.
+    Parameters are stored in a minimal intertwiner basis. ``execution="dense"``
+    preserves the historical global dense expansion and its versioned
+    no-gradient inference cache. ``execution="direct"`` contracts inputs with
+    reduced coefficients and intertwiner structure without materializing the
+    global dense weight. ``execution="auto"`` is a conservative whole-layer
+    selector: it uses direct execution only when every pair supports a favored
+    direct path and otherwise preserves global dense execution. The
+    ``"auto_hybrid"`` strategy selects per representation pair; favorable
+    pairs execute directly while the rest use pair-local dense operators.
+    ``"dense"`` is the backward-compatible default and retains the versioned
+    global inference cache.
+
+    ``backend`` selects how intertwiner bases are constructed; it is
+    independent of the execution strategy. :meth:`expand_parameters` always
+    returns the same physical dense operator for every execution strategy.
     """
 
     def __init__(
@@ -252,11 +391,17 @@ class WELinear(nn.Module):
         initialize: bool = True,
         *,
         backend: str = "auto",
+        execution: str = "dense",
     ):
         super().__init__()
         if backend not in {"auto", "structured", "generic"}:
             raise ValueError("backend must be 'auto', 'structured', or 'generic'")
+        if execution not in {"auto", "auto_hybrid", "dense", "direct"}:
+            raise ValueError(
+                "execution must be 'dense', 'direct', 'auto', or 'auto_hybrid'"
+            )
         self.backend = "structured" if backend == "auto" else backend
+        self.execution = execution
         if isinstance(in_type, Representation):
             in_type = as_field_type(in_type)
         if isinstance(out_type, Representation):
@@ -361,6 +506,23 @@ class WELinear(nn.Module):
         tensor, typed = unpack_representation_tensor(input, self.in_type, "input")
         if tensor.shape[-1] != self.in_type.size:
             raise ValueError(f"expected last dimension {self.in_type.size}, got {tensor.shape[-1]}")
+        if self.execution == "dense":
+            output = self._forward_dense(tensor)
+        else:
+            pair_choices = tuple(pair.auto_uses_direct() for pair in self._pairs)
+            auto_dense = self.execution == "auto" and (
+                not torch.is_grad_enabled() or not all(pair_choices)
+            )
+            hybrid_dense = self.execution == "auto_hybrid" and not any(pair_choices)
+            output = (
+                self._forward_dense(tensor)
+                if auto_dense or hybrid_dense
+                else self._forward_structured(tensor)
+            )
+        return wrap_if_typed(output, self.out_type, typed)
+
+    def _forward_dense(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Historical global dense execution, including inference caching."""
         if torch.is_grad_enabled():
             weight, bias = self.expand_parameters()
         else:
@@ -374,8 +536,19 @@ class WELinear(nn.Module):
                 self._inference_versions = versions
             weight = self._inference_weight
             bias = self._inference_bias if self.bias else None
-        output = F.linear(tensor, weight, bias)
-        return wrap_if_typed(output, self.out_type, typed)
+        return F.linear(tensor, weight, bias)
+
+    def _forward_structured(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Execute multiplicity-grouped representation-pair contractions."""
+        output = tensor.new_zeros(*tensor.shape[:-1], self.out_type.size)
+        for pair in self._pairs:
+            use_direct = self.execution == "direct" or pair.auto_uses_direct()
+            value = pair.direct(tensor) if use_direct else pair.dense(tensor)
+            output = pair.add_to_output(output, value)
+        if self.bias:
+            for bias in self._biases:
+                output = bias.add_to_output(output)
+        return output
 
     def _apply(self, fn, recurse=True):
         super()._apply(fn, recurse=recurse)
@@ -405,4 +578,7 @@ class WELinear(nn.Module):
 
     def extra_repr(self) -> str:
         parameters = sum(p.numel() for p in self.parameters())
-        return f"in={self.in_type.size}, out={self.out_type.size}, parameters={parameters}, bias={self.bias}"
+        return (
+            f"in={self.in_type.size}, out={self.out_type.size}, "
+            f"parameters={parameters}, bias={self.bias}, execution={self.execution!r}"
+        )
