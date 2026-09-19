@@ -228,6 +228,8 @@ class _PairExpansion(nn.Module):
             return mixed.unsqueeze(-1) * self.basis[0, :, 0]
 
         if self.direct_kind == "regular_trivial":
+            # direct_kind is named input -> output: project each regular input
+            # field to a scalar, then mix into trivial output fields.
             projected = torch.einsum("...ui,i->...u", value, self.basis[0, 0])
             return F.linear(projected, coefficients[..., 0]).unsqueeze(-1)
 
