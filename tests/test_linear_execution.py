@@ -272,6 +272,7 @@ def test_execution_validation_auto_policy_and_parameterless_map():
     assert torch.equal(zero(x), torch.zeros(2, other.size, dtype=torch.float64))
 
 
+@pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile unavailable")
 def test_direct_execution_torch_compile_smoke():
     space = _space()
     in_type = nn.FieldType(space, [space.trivial_repr] * 4)
